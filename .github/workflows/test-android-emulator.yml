@@ -1,0 +1,74 @@
+name: Test 1 - Android Emulator + ADB
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/test-android-emulator.yml"
+
+jobs:
+  android-emulator-adb:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm || true
+
+      - name: Boot emulator and test ADB
+        uses: ReactiveCircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          cores: 4
+          ram-size: 4096M
+          heap-size: 512M
+          disable-animations: true
+          emulator-options: >-
+            -no-window
+            -gpu swiftshader_indirect
+            -noaudio
+            -no-boot-anim
+            -camera-back none
+          script: |
+            set -euxo pipefail
+
+            mkdir -p output
+
+            echo "=== adb devices ===" | tee output/device-info.txt
+            adb devices -l | tee -a output/device-info.txt
+
+            echo "=== Android properties ===" | tee -a output/device-info.txt
+            echo "model=$(adb shell getprop ro.product.model | tr -d '\r')" | tee -a output/device-info.txt
+            echo "manufacturer=$(adb shell getprop ro.product.manufacturer | tr -d '\r')" | tee -a output/device-info.txt
+            echo "android=$(adb shell getprop ro.build.version.release | tr -d '\r')" | tee -a output/device-info.txt
+            echo "api=$(adb shell getprop ro.build.version.sdk | tr -d '\r')" | tee -a output/device-info.txt
+            echo "abi=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')" | tee -a output/device-info.txt
+            adb shell wm size | tee -a output/device-info.txt
+
+            echo "=== Screenshot ===" | tee -a output/device-info.txt
+            adb exec-out screencap -p > output/emulator-screen.png
+            test -s output/emulator-screen.png
+            file output/emulator-screen.png | tee -a output/device-info.txt
+
+            echo "TEST 1 PASSED" | tee output/result.txt
+
+      - name: Upload Test 1 result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-1-android-emulator
+          path: output/
+          if-no-files-found: warn
+          retention-days: 7
