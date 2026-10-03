@@ -1,0 +1,116 @@
+name: Test 2.5 - AOV Play Store + Storage
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/test-aov-playstore-storage.yml"
+
+jobs:
+  aov-playstore-storage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Host disk before emulator
+        run: |
+          mkdir -p output
+          df -h / | tee output/host-disk-before.txt
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm || true
+
+      - name: Boot larger Google Play emulator and open AOV listing
+        uses: ReactiveCircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis_playstore
+          arch: x86_64
+          profile: pixel_7
+          cores: 4
+          ram-size: 4096M
+          heap-size: 512M
+          disk-size: 12G
+          disable-animations: true
+          pre-emulator-launch-script: |
+            adb start-server
+          emulator-options: >-
+            -no-window
+            -gpu swiftshader_indirect
+            -noaudio
+            -no-boot-anim
+            -camera-back none
+            -no-metrics
+            -no-snapshot-load
+            -no-snapshot-save
+          script: |
+            mkdir -p output
+
+            echo "=== Device ===" | tee output/test-2-5.txt
+            adb devices -l | tee -a output/test-2-5.txt
+            echo "android=$(adb shell getprop ro.build.version.release | tr -d '\r')" | tee -a output/test-2-5.txt
+            echo "api=$(adb shell getprop ro.build.version.sdk | tr -d '\r')" | tee -a output/test-2-5.txt
+            echo "abi=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')" | tee -a output/test-2-5.txt
+
+            echo "" | tee -a output/test-2-5.txt
+            echo "=== Emulator storage ===" | tee -a output/test-2-5.txt
+            adb shell df -h /data | tee -a output/test-2-5.txt
+            DATA_FREE_KB=$(adb shell df -k /data | tail -n 1 | awk '{print $4}' | tr -d '\r')
+            echo "data_free_kb=$DATA_FREE_KB" | tee -a output/test-2-5.txt
+
+            echo "" | tee -a output/test-2-5.txt
+            echo "=== Google Play ===" | tee -a output/test-2-5.txt
+            adb shell pm path com.android.vending | tee -a output/test-2-5.txt
+            adb shell pm path com.google.android.gms | tee -a output/test-2-5.txt
+
+            echo "" | tee -a output/test-2-5.txt
+            echo "=== Open Arena of Valor listing ===" | tee -a output/test-2-5.txt
+            adb shell am start -W \
+              -a android.intent.action.VIEW \
+              -d "market://details?id=com.garena.game.kgvn" \
+              com.android.vending > output/open-aov-playstore.txt 2>&1 || true
+            cat output/open-aov-playstore.txt | tee -a output/test-2-5.txt
+
+            sleep 12
+
+            adb shell dumpsys activity activities | grep -m1 "mResumedActivity" | tee output/resumed-activity.txt || true
+            cat output/resumed-activity.txt | tee -a output/test-2-5.txt
+
+            adb shell uiautomator dump /sdcard/aov-playstore.xml > output/uiautomator.txt 2>&1 || true
+            adb exec-out cat /sdcard/aov-playstore.xml > output/aov-playstore.xml 2>/dev/null || true
+
+            adb exec-out screencap -p > output/aov-playstore.png
+            test -s output/aov-playstore.png
+            file output/aov-playstore.png | tee -a output/test-2-5.txt
+
+            if [ -n "$DATA_FREE_KB" ] && [ "$DATA_FREE_KB" -lt 8000000 ]; then
+              echo "FAIL: /data has less than ~8 GB free" | tee output/result.txt
+              exit 1
+            fi
+
+            grep -q "com.android.vending" output/resumed-activity.txt
+
+            echo "TEST 2.5 PASSED" | tee output/result.txt
+
+      - name: Host disk after emulator
+        if: always()
+        run: |
+          df -h / | tee output/host-disk-after.txt
+
+      - name: Upload Test 2.5 result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-2-5-aov-playstore-storage
+          path: output/
+          if-no-files-found: warn
+          retention-days: 7
