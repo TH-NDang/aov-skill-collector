@@ -45,53 +45,40 @@ jobs:
             -no-snapshot-load
             -no-snapshot-save
           script: |
-            set -eu
-
             mkdir -p output
-
-            {
-              echo "=== adb devices ==="
-              adb devices -l
-
-              echo
-              echo "=== Android ==="
-              echo "model=$(adb shell getprop ro.product.model | tr -d '\r')"
-              echo "manufacturer=$(adb shell getprop ro.product.manufacturer | tr -d '\r')"
-              echo "android=$(adb shell getprop ro.build.version.release | tr -d '\r')"
-              echo "api=$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
-              echo "abi=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
-              adb shell wm size
-
-              echo
-              echo "=== Google Play packages ==="
-              echo "play_store_path=$(adb shell pm path com.android.vending | tr -d '\r')"
-              echo "play_services_path=$(adb shell pm path com.google.android.gms | tr -d '\r')"
-              adb shell dumpsys package com.android.vending | grep -m1 "versionName=" || true
-              adb shell dumpsys package com.google.android.gms | grep -m1 "versionName=" || true
-
-              echo
-              echo "=== Storage ==="
-              adb shell df -h /data || true
-
-              echo
-              echo "=== Memory ==="
-              adb shell cat /proc/meminfo | head -n 8 || true
-            } | tee output/environment.txt
-
+            echo "=== adb devices ===" | tee output/environment.txt
+            adb devices -l | tee -a output/environment.txt
+            echo "" | tee -a output/environment.txt
+            echo "=== Android ===" | tee -a output/environment.txt
+            echo "model=$(adb shell getprop ro.product.model | tr -d '\r')" | tee -a output/environment.txt
+            echo "manufacturer=$(adb shell getprop ro.product.manufacturer | tr -d '\r')" | tee -a output/environment.txt
+            echo "android=$(adb shell getprop ro.build.version.release | tr -d '\r')" | tee -a output/environment.txt
+            echo "api=$(adb shell getprop ro.build.version.sdk | tr -d '\r')" | tee -a output/environment.txt
+            echo "abi=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')" | tee -a output/environment.txt
+            adb shell wm size | tee -a output/environment.txt
+            echo "" | tee -a output/environment.txt
+            echo "=== Google Play packages ===" | tee -a output/environment.txt
+            echo "play_store_path=$(adb shell pm path com.android.vending | tr -d '\r')" | tee -a output/environment.txt
+            echo "play_services_path=$(adb shell pm path com.google.android.gms | tr -d '\r')" | tee -a output/environment.txt
+            adb shell dumpsys package com.android.vending | grep -m1 "versionName=" | tee -a output/environment.txt || true
+            adb shell dumpsys package com.google.android.gms | grep -m1 "versionName=" | tee -a output/environment.txt || true
+            echo "" | tee -a output/environment.txt
+            echo "=== Storage ===" | tee -a output/environment.txt
+            adb shell df -h /data | tee -a output/environment.txt || true
+            echo "" | tee -a output/environment.txt
+            echo "=== Memory ===" | tee -a output/environment.txt
+            adb shell cat /proc/meminfo | sed -n '1,8p' | tee -a output/environment.txt || true
             test -n "$(adb shell pm path com.android.vending | tr -d '\r')"
             test -n "$(adb shell pm path com.google.android.gms | tr -d '\r')"
-
             adb shell input keyevent KEYCODE_WAKEUP || true
             adb shell input keyevent 82 || true
-
-            echo "Launching Play Store..."
-            adb shell monkey -p com.android.vending -c android.intent.category.LAUNCHER 1 > output/play-store-launch.txt 2>&1 || true
+            echo "Launching Play Store..." | tee output/play-store-launch.txt
+            adb shell monkey -p com.android.vending -c android.intent.category.LAUNCHER 1 >> output/play-store-launch.txt 2>&1 || true
             sleep 8
-
+            adb shell dumpsys activity activities | grep -m1 "mResumedActivity" | tee -a output/environment.txt || true
             adb exec-out screencap -p > output/play-store-screen.png
             test -s output/play-store-screen.png
             file output/play-store-screen.png | tee -a output/environment.txt
-
             echo "TEST 2 PASSED" | tee output/result.txt
 
       - name: Upload Test 2 result
