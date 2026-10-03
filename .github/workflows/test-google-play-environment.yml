@@ -1,0 +1,104 @@
+name: Test 2 - Google Play Environment
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/test-google-play-environment.yml"
+
+jobs:
+  google-play-environment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm || true
+
+      - name: Boot Google Play emulator and inspect environment
+        uses: ReactiveCircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis_playstore
+          arch: x86_64
+          profile: pixel_7
+          cores: 4
+          ram-size: 4096M
+          heap-size: 512M
+          disable-animations: true
+          emulator-options: >-
+            -no-window
+            -gpu swiftshader_indirect
+            -noaudio
+            -no-boot-anim
+            -camera-back none
+            -no-metrics
+            -no-snapshot-load
+            -no-snapshot-save
+          script: |
+            set -eu
+
+            mkdir -p output
+
+            {
+              echo "=== adb devices ==="
+              adb devices -l
+
+              echo
+              echo "=== Android ==="
+              echo "model=$(adb shell getprop ro.product.model | tr -d '\r')"
+              echo "manufacturer=$(adb shell getprop ro.product.manufacturer | tr -d '\r')"
+              echo "android=$(adb shell getprop ro.build.version.release | tr -d '\r')"
+              echo "api=$(adb shell getprop ro.build.version.sdk | tr -d '\r')"
+              echo "abi=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')"
+              adb shell wm size
+
+              echo
+              echo "=== Google Play packages ==="
+              echo "play_store_path=$(adb shell pm path com.android.vending | tr -d '\r')"
+              echo "play_services_path=$(adb shell pm path com.google.android.gms | tr -d '\r')"
+              adb shell dumpsys package com.android.vending | grep -m1 "versionName=" || true
+              adb shell dumpsys package com.google.android.gms | grep -m1 "versionName=" || true
+
+              echo
+              echo "=== Storage ==="
+              adb shell df -h /data || true
+
+              echo
+              echo "=== Memory ==="
+              adb shell cat /proc/meminfo | head -n 8 || true
+            } | tee output/environment.txt
+
+            test -n "$(adb shell pm path com.android.vending | tr -d '\r')"
+            test -n "$(adb shell pm path com.google.android.gms | tr -d '\r')"
+
+            adb shell input keyevent KEYCODE_WAKEUP || true
+            adb shell input keyevent 82 || true
+
+            echo "Launching Play Store..."
+            adb shell monkey -p com.android.vending -c android.intent.category.LAUNCHER 1 > output/play-store-launch.txt 2>&1 || true
+            sleep 8
+
+            adb exec-out screencap -p > output/play-store-screen.png
+            test -s output/play-store-screen.png
+            file output/play-store-screen.png | tee -a output/environment.txt
+
+            echo "TEST 2 PASSED" | tee output/result.txt
+
+      - name: Upload Test 2 result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-2-google-play-environment
+          path: output/
+          if-no-files-found: warn
+          retention-days: 7
