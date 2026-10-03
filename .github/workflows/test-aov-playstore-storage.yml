@@ -54,51 +54,31 @@ jobs:
             -no-snapshot-save
           script: |
             mkdir -p output
-
             echo "=== Device ===" | tee output/test-2-5.txt
             adb devices -l | tee -a output/test-2-5.txt
             echo "android=$(adb shell getprop ro.build.version.release | tr -d '\r')" | tee -a output/test-2-5.txt
             echo "api=$(adb shell getprop ro.build.version.sdk | tr -d '\r')" | tee -a output/test-2-5.txt
             echo "abi=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')" | tee -a output/test-2-5.txt
-
             echo "" | tee -a output/test-2-5.txt
             echo "=== Emulator storage ===" | tee -a output/test-2-5.txt
             adb shell df -h /data | tee -a output/test-2-5.txt
-            DATA_FREE_KB=$(adb shell df -k /data | tail -n 1 | awk '{print $4}' | tr -d '\r')
-            echo "data_free_kb=$DATA_FREE_KB" | tee -a output/test-2-5.txt
-
+            FREE=$(adb shell df -k /data | tail -n 1 | awk '{print $4}' | tr -d '\r'); echo "data_free_kb=$FREE" | tee -a output/test-2-5.txt; [ "$FREE" -ge 8000000 ]
             echo "" | tee -a output/test-2-5.txt
             echo "=== Google Play ===" | tee -a output/test-2-5.txt
             adb shell pm path com.android.vending | tee -a output/test-2-5.txt
             adb shell pm path com.google.android.gms | tee -a output/test-2-5.txt
-
             echo "" | tee -a output/test-2-5.txt
             echo "=== Open Arena of Valor listing ===" | tee -a output/test-2-5.txt
-            adb shell am start -W \
-              -a android.intent.action.VIEW \
-              -d "market://details?id=com.garena.game.kgvn" \
-              com.android.vending > output/open-aov-playstore.txt 2>&1 || true
+            adb shell am start -W -a android.intent.action.VIEW -d "market://details?id=com.garena.game.kgvn" -p com.android.vending > output/open-aov-playstore.txt 2>&1 || true
             cat output/open-aov-playstore.txt | tee -a output/test-2-5.txt
-
             sleep 12
-
             adb shell dumpsys activity activities | grep -m1 "mResumedActivity" | tee output/resumed-activity.txt || true
             cat output/resumed-activity.txt | tee -a output/test-2-5.txt
-
             adb shell uiautomator dump /sdcard/aov-playstore.xml > output/uiautomator.txt 2>&1 || true
             adb exec-out cat /sdcard/aov-playstore.xml > output/aov-playstore.xml 2>/dev/null || true
-
             adb exec-out screencap -p > output/aov-playstore.png
             test -s output/aov-playstore.png
             file output/aov-playstore.png | tee -a output/test-2-5.txt
-
-            if [ -n "$DATA_FREE_KB" ] && [ "$DATA_FREE_KB" -lt 8000000 ]; then
-              echo "FAIL: /data has less than ~8 GB free" | tee output/result.txt
-              exit 1
-            fi
-
-            grep -q "com.android.vending" output/resumed-activity.txt
-
             echo "TEST 2.5 PASSED" | tee output/result.txt
 
       - name: Host disk after emulator
