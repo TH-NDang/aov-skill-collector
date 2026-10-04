@@ -321,7 +321,15 @@ def wait_for_package(pkg, timeout):
         time.sleep(5)
     return False
 
+def has_google_account():
+    # Do not log dumpsys output because it can contain the account email.
+    out = adb("shell", "dumpsys", "account", timeout=60)
+    return "type=com.google" in out or "com.google" in out and "Account {" in out
+
 def play_store_signed_in():
+    if has_google_account():
+        return True
+
     root = dump_ui("playstore-state")
     if root is None:
         return False
@@ -420,14 +428,15 @@ def handle_google_login():
     end = time.time() + VERIFY_TIMEOUT
     verification_saved = False
     last_number_match = None
+    last_heartbeat = 0
     while time.time() < end:
         # Common consent screens after login.
         tap_needles(["i agree", "tôi đồng ý", "accept", "chấp nhận"], timeout=2)
         tap_needles(["more", "thêm"], timeout=1)
 
         if play_store_signed_in():
+            log("Google account detected on Android; sign-in completed.")
             screenshot("05-playstore-signed-in")
-            log("Google/Play Store sign-in completed.")
             return True
 
         verification_blob = ui_text()
@@ -443,6 +452,12 @@ def handle_google_login():
         ]):
             verification_saved = True
             log("Google verification appears to be required. Keep this job open while approving it on your trusted device.")
+
+        now = time.time()
+        if now - last_heartbeat >= 30:
+            remaining = max(0, int(end - now))
+            log(f"Google verification wait still active; {remaining}s remaining.")
+            last_heartbeat = now
 
         time.sleep(5)
 
