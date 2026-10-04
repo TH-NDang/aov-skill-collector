@@ -140,6 +140,33 @@ def wait_ui_contains(markers, timeout=30):
         time.sleep(2)
     return ""
 
+def dismiss_google_account_info_dialog():
+    # Google may show an informational modal immediately after opening the
+    # account-add screen. It blocks the identifier field and must be closed
+    # before we try to type.
+    if tap_exact_text(["Close", "Đóng"], timeout=3):
+        log("Dismissed Google Account informational dialog via button label.")
+        return True
+
+    blob = ui_text()
+    if any(marker in blob for marker in [
+        "your device works better with a google account",
+        "sign in to google services",
+        "your device works better",
+    ]):
+        log("Google Account informational dialog detected; dismissing by fixed Pixel 7 coordinate.")
+        tap_fraction(0.82, 0.57)
+        time.sleep(2)
+        return True
+
+    # On this Google account screen the modal is not always fully exposed to
+    # UIAutomator. A single tap at the known Close-button position is harmless
+    # on the underlying identifier page and dismisses the modal when present.
+    log("Trying one safe fallback tap at the Google Account dialog Close position.")
+    tap_fraction(0.82, 0.57)
+    time.sleep(2)
+    return False
+
 def tap_needles(needles, timeout=30):
     end = time.time() + timeout
     while time.time() < end:
@@ -266,6 +293,11 @@ def handle_google_login():
 
     tap_needles(["sign in", "đăng nhập"], timeout=20)
     time.sleep(5)
+
+    # Important: Google can put a modal saying "Your device works better with
+    # a Google Account" over the account-add page. Close it before touching
+    # the email field.
+    dismiss_google_account_info_dialog()
     screenshot("02-google-login")
 
     # Email / identifier.
@@ -280,9 +312,6 @@ def handle_google_login():
         _, (x, y), _ = edits[0]
         tap_xy(x, y)
         focused_type(GOOGLE_EMAIL)
-    if tap_exact_text(["Close", "Đóng"], timeout=4):
-        log("Dismissed Google Account informational dialog.")
-
     if not tap_exact_text(["Next", "Tiếp theo"], timeout=10):
         log("Google Next button is not exposed in UIAutomator; using fixed Pixel 7 Next-button coordinates.")
         tap_fraction(0.87, 0.93)
