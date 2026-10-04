@@ -189,34 +189,53 @@ def handle_google_login():
 
     # Email / identifier.
     edits = edit_nodes()
-    if edits:
-        _, (x, y), _ = edits[0]
-        tap_xy(x, y)
-        focused_type(GOOGLE_EMAIL)
-        tap_needles(["next", "tiếp theo"], timeout=15)
-    else:
+    if not edits:
         log("No email EditText found yet; trying identifier-related controls.")
         tap_needles(["email", "phone", "tài khoản"], timeout=8)
         edits = edit_nodes()
-        if edits:
-            _, (x, y), _ = edits[0]
-            tap_xy(x, y)
-            focused_type(GOOGLE_EMAIL)
-            tap_needles(["next", "tiếp theo"], timeout=15)
+
+    if not edits:
+        log("Google email field is not accessible to UIAutomator. Not waiting for verification because credentials were not submitted.")
+        screenshot("03-google-email-field-not-accessible")
+        dump_ui("google-email-field-not-accessible")
+        (OUT / "google-login-state.txt").write_text("EMAIL_FIELD_NOT_ACCESSIBLE\n", encoding="utf-8")
+        return False
+
+    _, (x, y), _ = edits[0]
+    tap_xy(x, y)
+    focused_type(GOOGLE_EMAIL)
+    if not tap_needles(["next", "tiếp theo"], timeout=15):
+        log("Google Next button after email was not found.")
+        screenshot("03-google-next-after-email-not-found")
+        dump_ui("google-next-after-email-not-found")
+        (OUT / "google-login-state.txt").write_text("EMAIL_NEXT_NOT_ACCESSIBLE\n", encoding="utf-8")
+        return False
 
     time.sleep(5)
     screenshot("03-google-after-email")
 
     # Password.
     edits = edit_nodes()
-    if edits:
-        _, (x, y), _ = edits[-1]
-        tap_xy(x, y)
-        focused_type(GOOGLE_PASSWORD)
-        tap_needles(["next", "tiếp theo"], timeout=15)
+    if not edits:
+        log("Google password field is not accessible. Not waiting for verification because password was not submitted.")
+        screenshot("04-google-password-field-not-accessible")
+        dump_ui("google-password-field-not-accessible")
+        (OUT / "google-login-state.txt").write_text("PASSWORD_FIELD_NOT_ACCESSIBLE\n", encoding="utf-8")
+        return False
+
+    _, (x, y), _ = edits[-1]
+    tap_xy(x, y)
+    focused_type(GOOGLE_PASSWORD)
+    if not tap_needles(["next", "tiếp theo"], timeout=15):
+        log("Google Next button after password was not found.")
+        screenshot("04-google-next-after-password-not-found")
+        dump_ui("google-next-after-password-not-found")
+        (OUT / "google-login-state.txt").write_text("PASSWORD_NEXT_NOT_ACCESSIBLE\n", encoding="utf-8")
+        return False
 
     time.sleep(5)
     screenshot("04-google-after-password")
+    (OUT / "google-login-state.txt").write_text("CREDENTIALS_SUBMITTED\n", encoding="utf-8")
 
     log(f"Waiting up to {VERIFY_TIMEOUT}s for Google verification / sign-in completion.")
     end = time.time() + VERIFY_TIMEOUT
