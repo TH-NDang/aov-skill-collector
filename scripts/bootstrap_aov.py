@@ -211,24 +211,46 @@ def edit_nodes():
 
 ADB_IME_ID = "dev.thndang.aovcollector.adbime/.AdbIme"
 ADB_IME_ACTION = "dev.thndang.aovcollector.adbime.INPUT"
+ADB_IME_READY = False
 
 def setup_adb_ime():
-    apk = run(["bash", "tools/adb-ime/build.sh"], check=True, timeout=180).splitlines()[-1].strip()
-    adb("install", "-r", apk, check=True, timeout=120)
-    adb("shell", "ime", "enable", ADB_IME_ID, timeout=60)
-    adb("shell", "ime", "set", ADB_IME_ID, timeout=60)
-    state = adb("shell", "settings", "get", "secure", "default_input_method", timeout=60)
-    log("ADB input method selected." if ADB_IME_ID in state else "ADB input method selection could not be confirmed.")
+    global ADB_IME_READY
+    try:
+        apk = run(["bash", "tools/adb-ime/build.sh"], check=True, timeout=180).splitlines()[-1].strip()
+        adb("install", "-r", apk, check=True, timeout=120)
+
+        listed = adb("shell", "ime", "list", "-s", timeout=60)
+        log("Installed IMEs: " + ", ".join(line.strip() for line in listed.splitlines() if line.strip()))
+
+        enable_out = adb("shell", "ime", "enable", ADB_IME_ID, timeout=60)
+        set_out = adb("shell", "ime", "set", ADB_IME_ID, timeout=60)
+        state = adb("shell", "settings", "get", "secure", "default_input_method", timeout=60)
+
+        log("IME enable result: " + (enable_out or "<empty>"))
+        log("IME set result: " + (set_out or "<empty>"))
+        log("Default IME: " + (state or "<empty>"))
+
+        ADB_IME_READY = ADB_IME_ID in state
+        log("ADB input method selected." if ADB_IME_READY else "ADB input method selection could not be confirmed; native ADB text input will be used.")
+    except Exception as exc:
+        ADB_IME_READY = False
+        log("ADB IME setup failed; native ADB text input will be used instead: " + str(exc).splitlines()[0])
 
 def input_text(value):
-    encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
-    # The secret itself is never printed. It is delivered to our temporary IME over an ADB broadcast.
-    adb(
-        "shell", "am", "broadcast",
-        "-a", ADB_IME_ACTION,
-        "--es", "text_b64", encoded,
-        timeout=60,
-    )
+    if ADB_IME_READY:
+        encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+        # The secret itself is never printed. It is delivered to our temporary IME over an ADB broadcast.
+        adb(
+            "shell", "am", "broadcast",
+            "-a", ADB_IME_ACTION,
+            "--es", "text_b64", encoded,
+            timeout=60,
+        )
+    else:
+        # Now that the Google informational modal is dismissed before focusing
+        # the field, native ADB text injection can work as a reliable fallback.
+        # Passing argv avoids exposing the secret in our own logs.
+        adb("shell", "input", "text", value, timeout=60)
     time.sleep(1)
 
 def focused_type(value):
