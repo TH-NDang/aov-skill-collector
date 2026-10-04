@@ -508,30 +508,41 @@ def handle_google_login():
     last_number_match = None
     last_heartbeat = 0
     while time.time() < end:
-        # Google does not always show the same setup screens. Process whichever
-        # optional/terms screen is currently visible instead of assuming a
-        # fixed sequence after verification.
-        finish_google_post_login_setup(timeout=5)
-
-        if play_store_signed_in():
-            log("Google sign-in accepted; finishing any post-login setup screens.")
-            finish_google_post_login_setup()
-            screenshot("05-playstore-signed-in")
-            return True
-
+        # Read and report the verification screen FIRST. Do not run any
+        # post-login/setup automation while a verification challenge is visible,
+        # otherwise an unrelated "phone number"/setup handler can interfere.
         verification_blob = ui_text()
+        verification_lower = verification_blob.lower() if verification_blob else ""
+
         if verification_blob:
             last_number_match = report_google_verification(
                 verification_blob,
                 previous_number=last_number_match,
             )
 
-        if not verification_saved and any(x in verification_blob.lower() for x in [
+        verification_markers = [
             "2-step", "check your phone", "verify", "xác minh",
-            "kiểm tra điện thoại", "confirm", "security", "number match",
-        ]):
-            verification_saved = True
-            log("Google verification appears to be required. Keep this job open while approving it on your trusted device.")
+            "kiểm tra điện thoại", "confirm", "security",
+            "number match", "choose the number", "select the number",
+            "enter the number shown on your phone",
+            "enter the number shown on your device",
+        ]
+        verification_visible = any(x in verification_lower for x in verification_markers)
+
+        if verification_visible:
+            if not verification_saved:
+                verification_saved = True
+                log("Google verification appears to be required. Keep this job open while approving it on your trusted device.")
+        else:
+            # Only after the verification challenge disappears do we process
+            # optional Google setup screens that may or may not exist.
+            finish_google_post_login_setup(timeout=5)
+
+            if play_store_signed_in():
+                log("Google sign-in accepted; finishing any post-login setup screens.")
+                finish_google_post_login_setup()
+                screenshot("05-playstore-signed-in")
+                return True
 
         now = time.time()
         if now - last_heartbeat >= 30:
