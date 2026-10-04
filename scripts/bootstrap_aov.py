@@ -394,8 +394,10 @@ def finish_google_post_login_setup(timeout=180):
 
 def has_google_account():
     # Do not log dumpsys output because it can contain the account email.
+    # Only count a real Account record; generic references to com.google in
+    # AccountManager internals are not proof that a user Google account exists.
     out = adb("shell", "dumpsys", "account", timeout=60)
-    return "type=com.google" in out or "com.google" in out and "Account {" in out
+    return bool(re.search(r"Account \{name=.*?, type=com\.google\}", out))
 
 def play_store_signed_in():
     if has_google_account():
@@ -418,7 +420,10 @@ def play_store_signed_in():
     sign_in_markers = ["sign in", "đăng nhập"]
     if any(m in joined for m in signed_in_markers) and not any(m == b.strip() for b in blobs for m in sign_in_markers):
         return True
-    return PKG_PLAY in resumed_activity() and not any("sign in" in b or "đăng nhập" in b for b in blobs)
+
+    # Being inside the Play Store activity is not enough: the unauthenticated
+    # splash/login screen is also com.android.vending.
+    return False
 
 def handle_google_login():
     log("Opening Play Store...")
@@ -557,7 +562,33 @@ def install_aov():
         return True
 
     if not tap_needles(["install", "cài đặt"], timeout=25):
+        blob = ui_text().lower()
         screenshot("aov-install-button-not-found")
+
+        if "sign in" in blob or "đăng nhập" in blob:
+            (OUT / "aov-install-state.txt").write_text("PLAY_STORE_SIGN_IN_REQUIRED\n", encoding="utf-8")
+            log("Play Store is still unauthenticated; AOV install cannot start.")
+        elif any(x in blob for x in [
+            "isn't available for your device",
+            "not available for your device",
+            "not compatible with your device",
+            "this app won't work for your device",
+            "không tương thích với thiết bị",
+            "không có sẵn cho thiết bị",
+        ]):
+            (OUT / "aov-install-state.txt").write_text("AOV_DEVICE_INCOMPATIBLE\n", encoding="utf-8")
+            log("AOV appears unavailable/incompatible for this emulator device.")
+        elif any(x in blob for x in [
+            "not available in your country",
+            "not available in your region",
+            "không có sẵn ở quốc gia",
+            "không có sẵn tại khu vực",
+        ]):
+            (OUT / "aov-install-state.txt").write_text("AOV_REGION_UNAVAILABLE\n", encoding="utf-8")
+            log("AOV appears unavailable for the Play Store region.")
+        else:
+            (OUT / "aov-install-state.txt").write_text("AOV_INSTALL_BUTTON_NOT_FOUND\n", encoding="utf-8")
+            log("AOV listing opened, but no recognized Install button/state was found.")
         return False
 
     log(f"Install requested. Waiting up to {INSTALL_TIMEOUT}s for package {PKG_AOV}.")
@@ -661,8 +692,10 @@ def main():
 
     open_aov_listing()
     if not install_aov():
-        write_result("AOV_INSTALL_NOT_STARTED",
-                     "The Play Store listing opened, but the Install button could not be activated.")
+        state_file = OUT / "aov-install-state.txt"
+        state = state_file.read_text(encoding="utf-8").strip() if state_file.exists() else "AOV_INSTALL_NOT_STARTED"
+        write_result(state,
+                     "The Play Store listing did not reach an installable AOV state. Evidence was saved.")
         return 0
 
     if not package_installed(PKG_AOV):
