@@ -178,6 +178,21 @@ def report_google_verification(blob, previous_number=None):
         log("This flow needs a number from your trusted phone entered into the emulator.")
     return previous_number
 
+def handle_google_signin_intro():
+    blob = ui_text().lower()
+    if any(x in blob for x in [
+        "sign in with ease",
+        "search for accounts connected to this phone number",
+        "we can search for accounts connected to this phone number",
+    ]):
+        log("Google 'Sign in with ease' intro detected.")
+        if not tap_exact_text(["Skip", "Bỏ qua"], timeout=5):
+            log("Skip is not exposed; using fixed bottom-left Pixel 7 coordinate.")
+            tap_fraction(0.08, 0.93)
+            time.sleep(2)
+        return True
+    return False
+
 def dismiss_google_account_info_dialog():
     # Google may show an informational modal immediately after opening the
     # account-add screen. It blocks the identifier field and must be closed
@@ -321,6 +336,62 @@ def wait_for_package(pkg, timeout):
         time.sleep(5)
     return False
 
+def finish_google_post_login_setup(timeout=180):
+    log("Handling Google post-sign-in setup screens.")
+    end = time.time() + timeout
+
+    while time.time() < end:
+        blob = ui_text().lower()
+
+        # Optional setup screens: prefer the privacy-minimizing choice.
+        if any(x in blob for x in [
+            "back up",
+            "backup",
+            "google one",
+            "add a phone number",
+            "phone number",
+            "set up payment",
+            "payment method",
+            "use your number",
+        ]):
+            if tap_exact_text([
+                "Not now", "No thanks", "Skip", "Don't turn on",
+                "Bỏ qua", "Không phải bây giờ", "Không, cảm ơn",
+            ], timeout=3):
+                time.sleep(2)
+                continue
+
+        # Mandatory account/terms/service confirmations.
+        if tap_exact_text(["I agree", "Tôi đồng ý"], timeout=2):
+            time.sleep(2)
+            continue
+
+        if tap_exact_text(["More", "Thêm"], timeout=2):
+            time.sleep(1)
+            continue
+
+        if any(x in blob for x in [
+            "google services",
+            "terms of service",
+            "privacy policy",
+        ]):
+            if tap_exact_text(["Accept", "Chấp nhận", "Continue", "Tiếp tục"], timeout=3):
+                time.sleep(2)
+                continue
+
+        # If Android already has the Google account, try to leave setup and
+        # reopen Play Store. This is our strongest completion signal.
+        if has_google_account():
+            log("Google account is present in Android account manager.")
+            adb("shell", "am", "force-stop", PKG_PLAY, timeout=30)
+            adb("shell", "monkey", "-p", PKG_PLAY, "-c", "android.intent.category.LAUNCHER", "1", timeout=30)
+            time.sleep(6)
+            return True
+
+        time.sleep(3)
+
+    return has_google_account()
+
 def has_google_account():
     # Do not log dumpsys output because it can contain the account email.
     out = adb("shell", "dumpsys", "account", timeout=60)
@@ -361,6 +432,8 @@ def handle_google_login():
 
     tap_needles(["sign in", "đăng nhập"], timeout=20)
     time.sleep(5)
+
+    handle_google_signin_intro()
 
     # Important: Google can put a modal saying "Your device works better with
     # a Google Account" over the account-add page. Close it before touching
@@ -435,7 +508,8 @@ def handle_google_login():
         tap_needles(["more", "thêm"], timeout=1)
 
         if play_store_signed_in():
-            log("Google account detected on Android; sign-in completed.")
+            log("Google sign-in accepted; finishing any post-login setup screens.")
+            finish_google_post_login_setup()
             screenshot("05-playstore-signed-in")
             return True
 
