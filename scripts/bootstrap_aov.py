@@ -116,6 +116,30 @@ def tap_needles(needles, timeout=30):
         time.sleep(2)
     return False
 
+def tap_exact_text(labels, timeout=20):
+    wanted = {x.strip().lower() for x in labels}
+    end = time.time() + timeout
+    while time.time() < end:
+        root = dump_ui("latest-ui")
+        if root is not None:
+            matches = []
+            for n in root.iter("node"):
+                text = n.attrib.get("text", "").strip().lower()
+                desc = n.attrib.get("content-desc", "").strip().lower()
+                if text in wanted or desc in wanted:
+                    center = bounds_center(n.attrib.get("bounds", ""))
+                    if center:
+                        matches.append((n, center, text or desc))
+            if matches:
+                matches.sort(key=lambda item: item[0].attrib.get("clickable") != "true")
+                n, (x, y), label = matches[0]
+                log(f"Tapping exact UI label: {label}")
+                tap_xy(x, y)
+                time.sleep(2)
+                return True
+        time.sleep(2)
+    return False
+
 def edit_nodes():
     return find_nodes(class_contains="EditText")
 
@@ -190,21 +214,25 @@ def handle_google_login():
     # Email / identifier.
     edits = edit_nodes()
     if not edits:
-        log("No email EditText found yet; trying identifier-related controls.")
-        tap_needles(["email", "phone", "tài khoản"], timeout=8)
-        edits = edit_nodes()
-
-    if not edits:
-        log("Google email field is not accessible to UIAutomator. Not waiting for verification because credentials were not submitted.")
-        screenshot("03-google-email-field-not-accessible")
-        dump_ui("google-email-field-not-accessible")
-        (OUT / "google-login-state.txt").write_text("EMAIL_FIELD_NOT_ACCESSIBLE\n", encoding="utf-8")
-        return False
-
-    _, (x, y), _ = edits[0]
-    tap_xy(x, y)
-    focused_type(GOOGLE_EMAIL)
-    if not tap_needles(["next", "tiếp theo"], timeout=15):
+        log("No email EditText found yet; trying only exact identifier field labels.")
+        if tap_exact_text([
+            "Email or phone",
+            "Email hoặc số điện thoại",
+            "Số điện thoại hoặc email",
+        ], timeout=12):
+            input_text(GOOGLE_EMAIL)
+            time.sleep(1)
+        else:
+            log("Google identifier field is not accessible. Refusing to click broad text such as 'Forgot email?'.")
+            screenshot("03-google-email-field-not-accessible")
+            dump_ui("google-email-field-not-accessible")
+            (OUT / "google-login-state.txt").write_text("EMAIL_FIELD_NOT_ACCESSIBLE\n", encoding="utf-8")
+            return False
+    else:
+        _, (x, y), _ = edits[0]
+        tap_xy(x, y)
+        focused_type(GOOGLE_EMAIL)
+    if not tap_exact_text(["Next", "Tiếp theo"], timeout=15):
         log("Google Next button after email was not found.")
         screenshot("03-google-next-after-email-not-found")
         dump_ui("google-next-after-email-not-found")
@@ -226,7 +254,7 @@ def handle_google_login():
     _, (x, y), _ = edits[-1]
     tap_xy(x, y)
     focused_type(GOOGLE_PASSWORD)
-    if not tap_needles(["next", "tiếp theo"], timeout=15):
+    if not tap_exact_text(["Next", "Tiếp theo"], timeout=15):
         log("Google Next button after password was not found.")
         screenshot("04-google-next-after-password-not-found")
         dump_ui("google-next-after-password-not-found")
