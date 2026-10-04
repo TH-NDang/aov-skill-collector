@@ -1,0 +1,71 @@
+name: Test 3 - One-shot AOV Bootstrap
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/test-aov-bootstrap.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap-aov:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+
+    env:
+      GOOGLE_EMAIL: ${{ secrets.GOOGLE_EMAIL }}
+      GOOGLE_PASSWORD: ${{ secrets.GOOGLE_PASSWORD }}
+      AOV_USERNAME: ${{ secrets.AOV_USERNAME }}
+      AOV_PASSWORD: ${{ secrets.AOV_PASSWORD }}
+      GOOGLE_VERIFY_TIMEOUT: "900"
+      AOV_INSTALL_TIMEOUT: "1200"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm || true
+
+      - name: Run one-shot Google -> install AOV -> Garena login
+        uses: ReactiveCircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis_playstore
+          arch: x86_64
+          profile: pixel_7
+          cores: 4
+          ram-size: 4096M
+          heap-size: 512M
+          disk-size: 12G
+          disable-animations: true
+          pre-emulator-launch-script: |
+            adb start-server
+          emulator-options: >-
+            -no-window
+            -gpu swiftshader_indirect
+            -noaudio
+            -no-boot-anim
+            -camera-back none
+            -no-metrics
+            -no-snapshot-load
+            -no-snapshot-save
+          script: |
+            python3 scripts/bootstrap_aov.py
+
+      - name: Upload bootstrap evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-3-aov-bootstrap
+          path: output/
+          if-no-files-found: warn
+          retention-days: 7
