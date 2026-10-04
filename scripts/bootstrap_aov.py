@@ -140,6 +140,44 @@ def wait_ui_contains(markers, timeout=30):
         time.sleep(2)
     return ""
 
+def extract_google_number_match(blob):
+    # Prefer an accessibility node/text fragment that is exactly a 2-digit
+    # number. Google number matching normally renders the challenge number as
+    # standalone text.
+    exact = re.findall(r"(?m)^\s*(\d{2})\s*$", blob)
+    if exact:
+        return exact[0]
+
+    # Fallback to contextual phrases used by Google verification screens.
+    patterns = [
+        r"(?:tap|select|choose|pick)\D{0,50}(\d{2})\b",
+        r"\b(\d{2})\b\D{0,50}(?:on your phone|on your device)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, blob, re.IGNORECASE)
+        if m:
+            return m.group(1)
+    return None
+
+def report_google_verification(blob, previous_number=None):
+    number = extract_google_number_match(blob)
+    if number and number != previous_number:
+        log("=" * 56)
+        log(f"GOOGLE_NUMBER_MATCH={number}")
+        log(f"On your trusted phone, approve the sign-in and choose {number}.")
+        log("=" * 56)
+        return number
+
+    lower = blob.lower()
+    if any(marker in lower for marker in [
+        "enter the number shown on your phone",
+        "enter the number shown on your device",
+        "nhập số hiển thị trên điện thoại",
+    ]):
+        log("GOOGLE_VERIFICATION_REQUIRES_NUMBER_INPUT_FROM_TRUSTED_DEVICE")
+        log("This flow needs a number from your trusted phone entered into the emulator.")
+    return previous_number
+
 def dismiss_google_account_info_dialog():
     # Google may show an informational modal immediately after opening the
     # account-add screen. It blocks the identifier field and must be closed
@@ -381,6 +419,7 @@ def handle_google_login():
     log(f"Waiting up to {VERIFY_TIMEOUT}s for Google verification / sign-in completion.")
     end = time.time() + VERIFY_TIMEOUT
     verification_saved = False
+    last_number_match = None
     while time.time() < end:
         # Common consent screens after login.
         tap_needles(["i agree", "tôi đồng ý", "accept", "chấp nhận"], timeout=2)
@@ -391,17 +430,19 @@ def handle_google_login():
             log("Google/Play Store sign-in completed.")
             return True
 
-        if not verification_saved:
-            root = dump_ui("google-verification")
-            if root is not None:
-                joined = "\n".join(node_blob(n) for n in root.iter("node"))
-                if any(x in joined for x in [
-                    "2-step", "check your phone", "verify", "xác minh",
-                    "kiểm tra điện thoại", "confirm", "security"
-                ]):
-                    screenshot("google-verification")
-                    verification_saved = True
-                    log("Google verification appears to be required. Approve it on your trusted device while this job is running.")
+        verification_blob = ui_text()
+        if verification_blob:
+            last_number_match = report_google_verification(
+                verification_blob,
+                previous_number=last_number_match,
+            )
+
+        if not verification_saved and any(x in verification_blob.lower() for x in [
+            "2-step", "check your phone", "verify", "xác minh",
+            "kiểm tra điện thoại", "confirm", "security", "number match",
+        ]):
+            verification_saved = True
+            log("Google verification appears to be required. Keep this job open while approving it on your trusted device.")
 
         time.sleep(5)
 
