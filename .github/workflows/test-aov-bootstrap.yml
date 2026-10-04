@@ -2,10 +2,6 @@ name: Test 3 - One-shot AOV Bootstrap
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/test-aov-bootstrap.yml"
 
 permissions:
   contents: read
