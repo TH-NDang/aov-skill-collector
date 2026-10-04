@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import base64
 import re
 import subprocess
 import time
@@ -116,8 +117,16 @@ def tap_fraction(xf, yf):
     tap_xy(x, y)
 
 def ui_text():
-    root = dump_ui("latest-ui")
-    if root is None:
+    remote = "/sdcard/window.xml"
+    adb("shell", "uiautomator", "dump", remote, timeout=60)
+    raw = subprocess.run(
+        ["adb", "exec-out", "cat", remote],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    ).stdout
+    try:
+        root = ET.fromstring(raw)
+    except Exception:
         return ""
     return "\n".join(node_blob(n) for n in root.iter("node"))
 
@@ -173,9 +182,27 @@ def tap_exact_text(labels, timeout=20):
 def edit_nodes():
     return find_nodes(class_contains="EditText")
 
+ADB_IME_ID = "dev.thndang.aovcollector.adbime/.AdbIme"
+ADB_IME_ACTION = "dev.thndang.aovcollector.adbime.INPUT"
+
+def setup_adb_ime():
+    apk = run(["bash", "tools/adb-ime/build.sh"], check=True, timeout=180).splitlines()[-1].strip()
+    adb("install", "-r", apk, check=True, timeout=120)
+    adb("shell", "ime", "enable", ADB_IME_ID, timeout=60)
+    adb("shell", "ime", "set", ADB_IME_ID, timeout=60)
+    state = adb("shell", "settings", "get", "secure", "default_input_method", timeout=60)
+    log("ADB input method selected." if ADB_IME_ID in state else "ADB input method selection could not be confirmed.")
+
 def input_text(value):
-    # Do not print value. Passing as argv avoids local shell expansion.
-    adb("shell", "input", "text", value, timeout=60)
+    encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+    # The secret itself is never printed. It is delivered to our temporary IME over an ADB broadcast.
+    adb(
+        "shell", "am", "broadcast",
+        "-a", ADB_IME_ACTION,
+        "--es", "text_b64", encoded,
+        timeout=60,
+    )
+    time.sleep(1)
 
 def focused_type(value):
     adb("shell", "input", "keyevent", "KEYCODE_CTRL_A")
@@ -261,7 +288,6 @@ def handle_google_login():
         return False
 
     time.sleep(5)
-    screenshot("03-google-after-email")
 
     blob = wait_ui_contains([
         "enter your password",
@@ -274,8 +300,7 @@ def handle_google_login():
     ], timeout=30)
     if not blob:
         log("Could not confirm that Google advanced to the password screen.")
-        screenshot("04-google-password-screen-not-confirmed")
-        dump_ui("google-password-screen-not-confirmed")
+        (OUT / "google-password-screen-not-confirmed.txt").write_text("Password screen was not confirmed.\n", encoding="utf-8")
         (OUT / "google-login-state.txt").write_text("PASSWORD_SCREEN_NOT_CONFIRMED\n", encoding="utf-8")
         return False
 
@@ -283,7 +308,6 @@ def handle_google_login():
     edits = edit_nodes()
     if not edits:
         log("Google password input is rendered but not exposed as EditText. Using the fixed Pixel 7 screen location as a fallback.")
-        screenshot("04-google-password-field-visual-fallback")
         tap_fraction(0.50, 0.30)
         input_text(GOOGLE_PASSWORD)
         time.sleep(1)
@@ -293,13 +317,10 @@ def handle_google_login():
         focused_type(GOOGLE_PASSWORD)
     if not tap_exact_text(["Next", "Tiếp theo"], timeout=15):
         log("Google Next button after password was not found.")
-        screenshot("04-google-next-after-password-not-found")
-        dump_ui("google-next-after-password-not-found")
         (OUT / "google-login-state.txt").write_text("PASSWORD_NEXT_NOT_ACCESSIBLE\n", encoding="utf-8")
         return False
 
     time.sleep(5)
-    screenshot("04-google-after-password")
     (OUT / "google-login-state.txt").write_text("CREDENTIALS_SUBMITTED\n", encoding="utf-8")
 
     log(f"Waiting up to {VERIFY_TIMEOUT}s for Google verification / sign-in completion.")
@@ -444,6 +465,7 @@ def main():
         return 0
 
     log(adb("devices", "-l"))
+    setup_adb_ime()
 
     if not handle_google_login():
         state_file = OUT / "google-login-state.txt"
