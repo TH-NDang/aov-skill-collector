@@ -593,6 +593,13 @@ def install_aov():
 
     log(f"Install requested. Waiting up to {INSTALL_TIMEOUT}s for package {PKG_AOV}.")
     ok = wait_for_package(PKG_AOV, INSTALL_TIMEOUT)
+
+    if ok:
+        # Play Store can show an optional Play Pass promo after Install is tapped.
+        # It does not mean installation failed; dismiss it so later screenshots are clear.
+        if tap_exact_text(["Not now", "No thanks", "Bỏ qua", "Không phải bây giờ"], timeout=5):
+            log("Dismissed optional Google Play promo after install.")
+
     screenshot("07-aov-after-install-wait")
     return ok
 
@@ -600,16 +607,30 @@ def launch_aov():
     log("Launching AOV...")
     out = adb("shell", "monkey", "-p", PKG_AOV, "-c", "android.intent.category.LAUNCHER", "1", timeout=60)
     log("Launch command sent.")
-    time.sleep(30)
-    # Handle Android permission prompts only.
-    end = time.time() + 45
+
+    # The first immersive/full-screen app launch on a fresh Android image can
+    # show the system "Viewing full screen" hint over the game. It is separate
+    # from AOV and blocks the game UI until "Got it" is pressed.
+    time.sleep(8)
+    if tap_exact_text(["Got it", "Đã hiểu", "OK"], timeout=12):
+        log("Dismissed Android 'Viewing full screen' hint.")
+        time.sleep(3)
+
+    # Handle Android permission/system prompts only.
+    end = time.time() + 60
     while time.time() < end:
         hit = tap_needles([
             "while using the app", "only this time", "allow", "cho phép",
             "while using", "khi dùng ứng dụng"
         ], timeout=2)
+
+        if tap_exact_text(["Got it", "Đã hiểu", "OK"], timeout=1):
+            log("Dismissed remaining Android full-screen/system hint.")
+            hit = True
+
         if not hit:
             time.sleep(2)
+
     screenshot("08-aov-launched")
     dump_ui("aov-launched")
     return package_installed(PKG_AOV)
