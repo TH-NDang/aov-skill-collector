@@ -101,6 +101,36 @@ def find_nodes(needles=None, class_contains=None):
 def tap_xy(x, y):
     adb("shell", "input", "tap", str(x), str(y))
 
+def screen_size():
+    out = adb("shell", "wm", "size")
+    m = re.search(r"(\d+)x(\d+)", out)
+    if not m:
+        return (1080, 2400)
+    return (int(m.group(1)), int(m.group(2)))
+
+def tap_fraction(xf, yf):
+    w, h = screen_size()
+    x = int(w * xf)
+    y = int(h * yf)
+    log(f"Tapping fallback coordinate at {xf:.2f}w, {yf:.2f}h -> ({x},{y})")
+    tap_xy(x, y)
+
+def ui_text():
+    root = dump_ui("latest-ui")
+    if root is None:
+        return ""
+    return "\n".join(node_blob(n) for n in root.iter("node"))
+
+def wait_ui_contains(markers, timeout=30):
+    markers = [m.lower() for m in markers]
+    end = time.time() + timeout
+    while time.time() < end:
+        blob = ui_text()
+        if any(m in blob for m in markers):
+            return blob
+        time.sleep(2)
+    return ""
+
 def tap_needles(needles, timeout=30):
     end = time.time() + timeout
     while time.time() < end:
@@ -214,20 +244,11 @@ def handle_google_login():
     # Email / identifier.
     edits = edit_nodes()
     if not edits:
-        log("No email EditText found yet; trying only exact identifier field labels.")
-        if tap_exact_text([
-            "Email or phone",
-            "Email hoặc số điện thoại",
-            "Số điện thoại hoặc email",
-        ], timeout=12):
-            input_text(GOOGLE_EMAIL)
-            time.sleep(1)
-        else:
-            log("Google identifier field is not accessible. Refusing to click broad text such as 'Forgot email?'.")
-            screenshot("03-google-email-field-not-accessible")
-            dump_ui("google-email-field-not-accessible")
-            (OUT / "google-login-state.txt").write_text("EMAIL_FIELD_NOT_ACCESSIBLE\n", encoding="utf-8")
-            return False
+        log("Google identifier input is rendered but not exposed as EditText. Using the fixed Pixel 7 screen location as a fallback.")
+        screenshot("03-google-email-field-visual-fallback")
+        tap_fraction(0.50, 0.29)
+        input_text(GOOGLE_EMAIL)
+        time.sleep(1)
     else:
         _, (x, y), _ = edits[0]
         tap_xy(x, y)
@@ -242,18 +263,34 @@ def handle_google_login():
     time.sleep(5)
     screenshot("03-google-after-email")
 
+    blob = wait_ui_contains([
+        "enter your password",
+        "password",
+        "show password",
+        "welcome",
+        "nhập mật khẩu",
+        "mật khẩu",
+        "hiện mật khẩu",
+    ], timeout=30)
+    if not blob:
+        log("Could not confirm that Google advanced to the password screen.")
+        screenshot("04-google-password-screen-not-confirmed")
+        dump_ui("google-password-screen-not-confirmed")
+        (OUT / "google-login-state.txt").write_text("PASSWORD_SCREEN_NOT_CONFIRMED\n", encoding="utf-8")
+        return False
+
     # Password.
     edits = edit_nodes()
     if not edits:
-        log("Google password field is not accessible. Not waiting for verification because password was not submitted.")
-        screenshot("04-google-password-field-not-accessible")
-        dump_ui("google-password-field-not-accessible")
-        (OUT / "google-login-state.txt").write_text("PASSWORD_FIELD_NOT_ACCESSIBLE\n", encoding="utf-8")
-        return False
-
-    _, (x, y), _ = edits[-1]
-    tap_xy(x, y)
-    focused_type(GOOGLE_PASSWORD)
+        log("Google password input is rendered but not exposed as EditText. Using the fixed Pixel 7 screen location as a fallback.")
+        screenshot("04-google-password-field-visual-fallback")
+        tap_fraction(0.50, 0.30)
+        input_text(GOOGLE_PASSWORD)
+        time.sleep(1)
+    else:
+        _, (x, y), _ = edits[-1]
+        tap_xy(x, y)
+        focused_type(GOOGLE_PASSWORD)
     if not tap_exact_text(["Next", "Tiếp theo"], timeout=15):
         log("Google Next button after password was not found.")
         screenshot("04-google-next-after-password-not-found")
@@ -409,8 +446,10 @@ def main():
     log(adb("devices", "-l"))
 
     if not handle_google_login():
-        write_result("REQUIRES_GOOGLE_VERIFICATION_OR_LOGIN_FAILED",
-                     "Google sign-in did not complete before the timeout. Screenshots/UI dumps were saved.")
+        state_file = OUT / "google-login-state.txt"
+        state = state_file.read_text(encoding="utf-8").strip() if state_file.exists() else "GOOGLE_LOGIN_NOT_COMPLETED"
+        write_result(state,
+                     "Google sign-in did not complete. Screenshots/UI dumps were saved.")
         return 0
 
     open_aov_listing()
