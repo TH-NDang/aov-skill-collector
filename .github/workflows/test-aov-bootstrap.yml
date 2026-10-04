@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: test3-aov-bootstrap
+  cancel-in-progress: true
+
 jobs:
   bootstrap-aov:
     runs-on: ubuntu-latest
