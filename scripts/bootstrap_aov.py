@@ -1,0 +1,390 @@
+#!/usr/bin/env python3
+import os
+import re
+import subprocess
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+OUT = Path("output")
+OUT.mkdir(exist_ok=True)
+
+PKG_PLAY = "com.android.vending"
+PKG_AOV = "com.garena.game.kgvn"
+
+GOOGLE_EMAIL = os.environ.get("GOOGLE_EMAIL", "")
+GOOGLE_PASSWORD = os.environ.get("GOOGLE_PASSWORD", "")
+AOV_USERNAME = os.environ.get("AOV_USERNAME", "")
+AOV_PASSWORD = os.environ.get("AOV_PASSWORD", "")
+
+VERIFY_TIMEOUT = int(os.environ.get("GOOGLE_VERIFY_TIMEOUT", "900"))
+INSTALL_TIMEOUT = int(os.environ.get("AOV_INSTALL_TIMEOUT", "1200"))
+
+def log(msg):
+    print(msg, flush=True)
+
+def run(cmd, check=False, capture=True, timeout=120):
+    if isinstance(cmd, str):
+        raise TypeError("cmd must be a list")
+    p = subprocess.run(
+        cmd,
+        text=True,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.STDOUT if capture else None,
+        timeout=timeout,
+        check=False,
+    )
+    if check and p.returncode != 0:
+        raise RuntimeError(f"command failed ({p.returncode}): {' '.join(cmd)}\n{p.stdout or ''}")
+    return (p.stdout or "").strip()
+
+def adb(*args, check=False, timeout=120):
+    return run(["adb", *args], check=check, timeout=timeout)
+
+def write_result(state, detail=""):
+    text = state + ("\n" + detail if detail else "") + "\n"
+    (OUT / "result.txt").write_text(text, encoding="utf-8")
+    log(f"RESULT={state}")
+    if detail:
+        log(detail)
+
+def screenshot(name):
+    path = OUT / f"{name}.png"
+    with path.open("wb") as f:
+        subprocess.run(["adb", "exec-out", "screencap", "-p"], stdout=f, stderr=subprocess.DEVNULL, check=False)
+    return path
+
+def dump_ui(name="window"):
+    remote = "/sdcard/window.xml"
+    adb("shell", "uiautomator", "dump", remote, timeout=60)
+    raw = subprocess.run(["adb", "exec-out", "cat", remote], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+    path = OUT / f"{name}.xml"
+    path.write_bytes(raw)
+    try:
+        return ET.fromstring(raw)
+    except Exception:
+        return None
+
+def bounds_center(bounds):
+    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds or "")
+    if not m:
+        return None
+    x1, y1, x2, y2 = map(int, m.groups())
+    return ((x1 + x2) // 2, (y1 + y2) // 2)
+
+def node_blob(node):
+    vals = [
+        node.attrib.get("text", ""),
+        node.attrib.get("content-desc", ""),
+        node.attrib.get("resource-id", ""),
+        node.attrib.get("class", ""),
+    ]
+    return " ".join(vals).lower()
+
+def find_nodes(needles=None, class_contains=None):
+    root = dump_ui("latest-ui")
+    if root is None:
+        return []
+    needles = [n.lower() for n in (needles or [])]
+    out = []
+    for n in root.iter("node"):
+        blob = node_blob(n)
+        if needles and not any(x in blob for x in needles):
+            continue
+        if class_contains and class_contains.lower() not in n.attrib.get("class", "").lower():
+            continue
+        c = bounds_center(n.attrib.get("bounds", ""))
+        if c:
+            out.append((n, c, blob))
+    return out
+
+def tap_xy(x, y):
+    adb("shell", "input", "tap", str(x), str(y))
+
+def tap_needles(needles, timeout=30):
+    end = time.time() + timeout
+    while time.time() < end:
+        nodes = find_nodes(needles=needles)
+        if nodes:
+            # Prefer explicitly clickable nodes.
+            nodes.sort(key=lambda item: item[0].attrib.get("clickable") != "true")
+            n, (x, y), blob = nodes[0]
+            log(f"Tapping UI match: {blob[:140]}")
+            tap_xy(x, y)
+            time.sleep(2)
+            return True
+        time.sleep(2)
+    return False
+
+def edit_nodes():
+    return find_nodes(class_contains="EditText")
+
+def input_text(value):
+    # Do not print value. Passing as argv avoids local shell expansion.
+    adb("shell", "input", "text", value, timeout=60)
+
+def focused_type(value):
+    adb("shell", "input", "keyevent", "KEYCODE_CTRL_A")
+    time.sleep(0.3)
+    input_text(value)
+    time.sleep(0.8)
+
+def resumed_activity():
+    out = adb("shell", "dumpsys", "activity", "activities")
+    for line in out.splitlines():
+        if "mResumedActivity" in line:
+            return line.strip()
+    return ""
+
+def package_installed(pkg):
+    return bool(adb("shell", "pm", "path", pkg).strip())
+
+def wait_for_package(pkg, timeout):
+    end = time.time() + timeout
+    last_shot = 0
+    while time.time() < end:
+        if package_installed(pkg):
+            return True
+        # Handle occasional Play Store confirmation dialogs.
+        tap_needles(["continue", "tiếp tục", "ok", "accept", "chấp nhận"], timeout=2)
+        if time.time() - last_shot > 90:
+            screenshot("install-progress")
+            last_shot = time.time()
+        time.sleep(5)
+    return False
+
+def play_store_signed_in():
+    root = dump_ui("playstore-state")
+    if root is None:
+        return False
+    blobs = [node_blob(n) for n in root.iter("node")]
+    joined = "\n".join(blobs)
+    signed_in_markers = [
+        "search apps & games",
+        "search apps",
+        "tìm kiếm ứng dụng",
+        "for you",
+        "dành cho bạn",
+        "manage apps",
+        "quản lý ứng dụng",
+    ]
+    sign_in_markers = ["sign in", "đăng nhập"]
+    if any(m in joined for m in signed_in_markers) and not any(m == b.strip() for b in blobs for m in sign_in_markers):
+        return True
+    return PKG_PLAY in resumed_activity() and not any("sign in" in b or "đăng nhập" in b for b in blobs)
+
+def handle_google_login():
+    log("Opening Play Store...")
+    adb("shell", "monkey", "-p", PKG_PLAY, "-c", "android.intent.category.LAUNCHER", "1")
+    time.sleep(8)
+    screenshot("01-playstore-start")
+
+    if play_store_signed_in():
+        log("Play Store already appears signed in.")
+        return True
+
+    tap_needles(["sign in", "đăng nhập"], timeout=20)
+    time.sleep(5)
+    screenshot("02-google-login")
+
+    # Email / identifier.
+    edits = edit_nodes()
+    if edits:
+        _, (x, y), _ = edits[0]
+        tap_xy(x, y)
+        focused_type(GOOGLE_EMAIL)
+        tap_needles(["next", "tiếp theo"], timeout=15)
+    else:
+        log("No email EditText found yet; trying identifier-related controls.")
+        tap_needles(["email", "phone", "tài khoản"], timeout=8)
+        edits = edit_nodes()
+        if edits:
+            _, (x, y), _ = edits[0]
+            tap_xy(x, y)
+            focused_type(GOOGLE_EMAIL)
+            tap_needles(["next", "tiếp theo"], timeout=15)
+
+    time.sleep(5)
+    screenshot("03-google-after-email")
+
+    # Password.
+    edits = edit_nodes()
+    if edits:
+        _, (x, y), _ = edits[-1]
+        tap_xy(x, y)
+        focused_type(GOOGLE_PASSWORD)
+        tap_needles(["next", "tiếp theo"], timeout=15)
+
+    time.sleep(5)
+    screenshot("04-google-after-password")
+
+    log(f"Waiting up to {VERIFY_TIMEOUT}s for Google verification / sign-in completion.")
+    end = time.time() + VERIFY_TIMEOUT
+    verification_saved = False
+    while time.time() < end:
+        # Common consent screens after login.
+        tap_needles(["i agree", "tôi đồng ý", "accept", "chấp nhận"], timeout=2)
+        tap_needles(["more", "thêm"], timeout=1)
+
+        if play_store_signed_in():
+            screenshot("05-playstore-signed-in")
+            log("Google/Play Store sign-in completed.")
+            return True
+
+        if not verification_saved:
+            root = dump_ui("google-verification")
+            if root is not None:
+                joined = "\n".join(node_blob(n) for n in root.iter("node"))
+                if any(x in joined for x in [
+                    "2-step", "check your phone", "verify", "xác minh",
+                    "kiểm tra điện thoại", "confirm", "security"
+                ]):
+                    screenshot("google-verification")
+                    verification_saved = True
+                    log("Google verification appears to be required. Approve it on your trusted device while this job is running.")
+
+        time.sleep(5)
+
+    screenshot("google-login-timeout")
+    return False
+
+def open_aov_listing():
+    log("Opening Garena Liên Quân Mobile Play Store listing...")
+    adb(
+        "shell", "am", "start", "-W",
+        "-a", "android.intent.action.VIEW",
+        "-d", f"market://details?id={PKG_AOV}",
+        "-p", PKG_PLAY,
+        timeout=60,
+    )
+    time.sleep(12)
+    screenshot("06-aov-listing")
+    dump_ui("aov-listing")
+
+def install_aov():
+    if package_installed(PKG_AOV):
+        log("AOV package is already installed.")
+        return True
+
+    if not tap_needles(["install", "cài đặt"], timeout=25):
+        screenshot("aov-install-button-not-found")
+        return False
+
+    log(f"Install requested. Waiting up to {INSTALL_TIMEOUT}s for package {PKG_AOV}.")
+    ok = wait_for_package(PKG_AOV, INSTALL_TIMEOUT)
+    screenshot("07-aov-after-install-wait")
+    return ok
+
+def launch_aov():
+    log("Launching AOV...")
+    out = adb("shell", "monkey", "-p", PKG_AOV, "-c", "android.intent.category.LAUNCHER", "1", timeout=60)
+    log("Launch command sent.")
+    time.sleep(30)
+    # Handle Android permission prompts only.
+    end = time.time() + 45
+    while time.time() < end:
+        hit = tap_needles([
+            "while using the app", "only this time", "allow", "cho phép",
+            "while using", "khi dùng ứng dụng"
+        ], timeout=2)
+        if not hit:
+            time.sleep(2)
+    screenshot("08-aov-launched")
+    dump_ui("aov-launched")
+    return package_installed(PKG_AOV)
+
+def attempt_garena_login():
+    log("Attempting Garena login without emulator-detection bypasses.")
+
+    # Let splash/update screens settle and try obvious Continue/Agree buttons.
+    end = time.time() + 240
+    garena_clicked = False
+    while time.time() < end:
+        tap_needles(["agree", "đồng ý", "accept", "xác nhận", "continue", "tiếp tục"], timeout=2)
+        if tap_needles(["garena"], timeout=2):
+            garena_clicked = True
+            break
+        time.sleep(4)
+
+    screenshot("09-aov-login-area")
+    dump_ui("aov-login-area")
+
+    # Some Garena login screens expose Android/WebView EditText fields.
+    edits = edit_nodes()
+    if len(edits) >= 2:
+        log("Two login text fields are accessible via UI automation.")
+        _, (x1, y1), _ = edits[0]
+        _, (x2, y2), _ = edits[1]
+        tap_xy(x1, y1)
+        focused_type(AOV_USERNAME)
+        tap_xy(x2, y2)
+        focused_type(AOV_PASSWORD)
+        screenshot("10-garena-filled")
+        tap_needles(["login", "đăng nhập"], timeout=20)
+        time.sleep(30)
+        screenshot("11-aov-after-login-submit")
+        dump_ui("aov-after-login-submit")
+        return "AOV_LOGIN_ATTEMPTED"
+
+    if len(edits) == 1:
+        log("Only one login text field found; attempting sequential login flow.")
+        _, (x, y), _ = edits[0]
+        tap_xy(x, y)
+        focused_type(AOV_USERNAME)
+        if tap_needles(["next", "tiếp theo", "continue", "tiếp tục"], timeout=15):
+            time.sleep(3)
+            edits2 = edit_nodes()
+            if edits2:
+                _, (x2, y2), _ = edits2[-1]
+                tap_xy(x2, y2)
+                focused_type(AOV_PASSWORD)
+                tap_needles(["login", "đăng nhập"], timeout=20)
+                time.sleep(30)
+                screenshot("11-aov-after-login-submit")
+                return "AOV_LOGIN_ATTEMPTED"
+
+    # Game-rendered UI may not expose controls to uiautomator.
+    if garena_clicked:
+        return "GARENA_LOGIN_UI_NOT_ACCESSIBLE"
+    return "GARENA_BUTTON_NOT_ACCESSIBLE"
+
+def main():
+    missing = [name for name, value in {
+        "GOOGLE_EMAIL": GOOGLE_EMAIL,
+        "GOOGLE_PASSWORD": GOOGLE_PASSWORD,
+        "AOV_USERNAME": AOV_USERNAME,
+        "AOV_PASSWORD": AOV_PASSWORD,
+    }.items() if not value]
+    if missing:
+        write_result("MISSING_SECRETS", ", ".join(missing))
+        return 0
+
+    log(adb("devices", "-l"))
+
+    if not handle_google_login():
+        write_result("REQUIRES_GOOGLE_VERIFICATION_OR_LOGIN_FAILED",
+                     "Google sign-in did not complete before the timeout. Screenshots/UI dumps were saved.")
+        return 0
+
+    open_aov_listing()
+    if not install_aov():
+        write_result("AOV_INSTALL_NOT_STARTED",
+                     "The Play Store listing opened, but the Install button could not be activated.")
+        return 0
+
+    if not package_installed(PKG_AOV):
+        write_result("AOV_INSTALL_TIMEOUT", "AOV was not installed before the timeout.")
+        return 0
+
+    log("AOV installed successfully.")
+    if not launch_aov():
+        write_result("AOV_LAUNCH_FAILED")
+        return 0
+
+    state = attempt_garena_login()
+    write_result(state,
+                 "No emulator-identification bypass, root hiding, Play Integrity bypass, or anti-cheat bypass was used.")
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
