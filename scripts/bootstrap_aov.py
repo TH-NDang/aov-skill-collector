@@ -280,12 +280,13 @@ def handle_google_login():
         _, (x, y), _ = edits[0]
         tap_xy(x, y)
         focused_type(GOOGLE_EMAIL)
-    if not tap_exact_text(["Next", "Tiếp theo"], timeout=15):
-        log("Google Next button after email was not found.")
-        screenshot("03-google-next-after-email-not-found")
-        dump_ui("google-next-after-email-not-found")
-        (OUT / "google-login-state.txt").write_text("EMAIL_NEXT_NOT_ACCESSIBLE\n", encoding="utf-8")
-        return False
+    if tap_exact_text(["Close", "Đóng"], timeout=4):
+        log("Dismissed Google Account informational dialog.")
+
+    if not tap_exact_text(["Next", "Tiếp theo"], timeout=10):
+        log("Google Next button is not exposed in UIAutomator; using fixed Pixel 7 Next-button coordinates.")
+        tap_fraction(0.87, 0.93)
+        time.sleep(2)
 
     time.sleep(5)
 
@@ -315,10 +316,13 @@ def handle_google_login():
         _, (x, y), _ = edits[-1]
         tap_xy(x, y)
         focused_type(GOOGLE_PASSWORD)
-    if not tap_exact_text(["Next", "Tiếp theo"], timeout=15):
-        log("Google Next button after password was not found.")
-        (OUT / "google-login-state.txt").write_text("PASSWORD_NEXT_NOT_ACCESSIBLE\n", encoding="utf-8")
-        return False
+    if tap_exact_text(["Close", "Đóng"], timeout=3):
+        log("Dismissed informational dialog before password submit.")
+
+    if not tap_exact_text(["Next", "Tiếp theo"], timeout=10):
+        log("Google Next button after password is not exposed; using fixed Pixel 7 Next-button coordinates.")
+        tap_fraction(0.87, 0.93)
+        time.sleep(2)
 
     time.sleep(5)
     (OUT / "google-login-state.txt").write_text("CREDENTIALS_SUBMITTED\n", encoding="utf-8")
