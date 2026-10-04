@@ -508,9 +508,10 @@ def handle_google_login():
     last_number_match = None
     last_heartbeat = 0
     while time.time() < end:
-        # Common consent screens after login.
-        tap_needles(["i agree", "tôi đồng ý", "accept", "chấp nhận"], timeout=2)
-        tap_needles(["more", "thêm"], timeout=1)
+        # Google does not always show the same setup screens. Process whichever
+        # optional/terms screen is currently visible instead of assuming a
+        # fixed sequence after verification.
+        finish_google_post_login_setup(timeout=5)
 
         if play_store_signed_in():
             log("Google sign-in accepted; finishing any post-login setup screens.")
