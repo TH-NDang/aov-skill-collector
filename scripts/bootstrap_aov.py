@@ -315,9 +315,32 @@ def focused_type(value):
 def resumed_activity():
     out = adb("shell", "dumpsys", "activity", "activities")
     for line in out.splitlines():
-        if "mResumedActivity" in line:
+        if "mResumedActivity" in line or "topResumedActivity" in line:
             return line.strip()
     return ""
+
+
+def package_is_foreground(pkg):
+    # Android 15 emulator output is not consistent about mResumedActivity.
+    # Check multiple system signals, then fall back to the UI hierarchy package.
+    activity = adb("shell", "dumpsys", "activity", "activities", timeout=60)
+    for line in activity.splitlines():
+        if ("mResumedActivity" in line or "topResumedActivity" in line or "ResumedActivity" in line) and pkg in line:
+            return True
+
+    windows = adb("shell", "dumpsys", "window", "windows", timeout=60)
+    for line in windows.splitlines():
+        if ("mCurrentFocus" in line or "mFocusedApp" in line) and pkg in line:
+            return True
+
+    remote = "/sdcard/foreground.xml"
+    adb("shell", "uiautomator", "dump", remote, timeout=60)
+    raw = subprocess.run(
+        ["adb", "exec-out", "cat", remote],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    ).stdout.decode("utf-8", errors="ignore")
+    return f'package="{pkg}"' in raw
 
 def package_installed(pkg):
     return bool(adb("shell", "pm", "path", pkg).strip())
@@ -764,7 +787,7 @@ def launch_aov():
             log("Dismissed remaining Android full-screen/system hint.")
             hit = True
 
-        if PKG_AOV in resumed_activity():
+        if package_is_foreground(PKG_AOV):
             # Give the game a little time to settle after it first becomes foreground.
             time.sleep(8)
             break
@@ -774,7 +797,7 @@ def launch_aov():
 
     # If monkey returned to the launcher, retry using the app's resolved launcher
     # activity. This is a normal launch retry, not an emulator-detection bypass.
-    if PKG_AOV not in resumed_activity():
+    if not package_is_foreground(PKG_AOV):
         log("AOV is not in foreground after the first launch attempt; retrying the resolved launcher activity.")
         resolved = adb(
             "shell", "cmd", "package", "resolve-activity", "--brief",
@@ -793,7 +816,7 @@ def launch_aov():
     screenshot("08-aov-launched")
     dump_ui("aov-launched")
 
-    foreground = PKG_AOV in resumed_activity()
+    foreground = package_is_foreground(PKG_AOV)
     pid = adb("shell", "pidof", PKG_AOV, timeout=30).strip()
 
     if foreground:
@@ -834,12 +857,21 @@ def attempt_garena_login():
     # Let splash/update screens settle and try obvious Continue/Agree buttons.
     end = time.time() + 240
     garena_clicked = False
+    next_progress_shot = time.time() + 45
+    progress_index = 1
     while time.time() < end:
         tap_exact_text(["Cancel", "Hủy"], timeout=1)
         tap_needles(["agree", "đồng ý", "accept", "xác nhận", "continue", "tiếp tục"], timeout=2)
+
         if tap_needles(["garena"], timeout=2):
             garena_clicked = True
             break
+
+        if time.time() >= next_progress_shot:
+            screenshot(f"09-aov-progress-{progress_index}")
+            progress_index += 1
+            next_progress_shot = time.time() + 45
+
         time.sleep(4)
 
     screenshot("09-aov-login-area")
