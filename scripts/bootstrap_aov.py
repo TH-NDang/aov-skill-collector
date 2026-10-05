@@ -20,6 +20,8 @@ AOV_PASSWORD = os.environ.get("AOV_PASSWORD", "")
 
 VERIFY_TIMEOUT = int(os.environ.get("GOOGLE_VERIFY_TIMEOUT", "900"))
 INSTALL_TIMEOUT = int(os.environ.get("AOV_INSTALL_TIMEOUT", "1200"))
+AOV_RESOURCE_TIMEOUT = int(os.environ.get("AOV_RESOURCE_TIMEOUT", "600"))
+AOV_RESOURCE_MIN_WAIT = int(os.environ.get("AOV_RESOURCE_MIN_WAIT", "60"))
 
 def log(msg):
     print(msg, flush=True)
@@ -82,6 +84,15 @@ def node_blob(node):
     ]
     return " ".join(vals).lower()
 
+def label_blob(node):
+    # Human-visible labels only. Do not include package/resource-id here:
+    # com.garena.game.kgvn:id/unitySurfaceView previously matched "garena".
+    vals = [
+        node.attrib.get("text", ""),
+        node.attrib.get("content-desc", ""),
+    ]
+    return " ".join(vals).strip().lower()
+
 def find_nodes(needles=None, class_contains=None):
     root = dump_ui("latest-ui")
     if root is None:
@@ -98,6 +109,37 @@ def find_nodes(needles=None, class_contains=None):
         if c:
             out.append((n, c, blob))
     return out
+
+def find_label_nodes(needles=None):
+    root = dump_ui("latest-ui")
+    if root is None:
+        return []
+    needles = [n.lower() for n in (needles or [])]
+    out = []
+    for n in root.iter("node"):
+        blob = label_blob(n)
+        if not blob:
+            continue
+        if needles and not any(x in blob for x in needles):
+            continue
+        center = bounds_center(n.attrib.get("bounds", ""))
+        if center:
+            out.append((n, center, blob))
+    return out
+
+def tap_label_needles(needles, timeout=20):
+    end = time.time() + timeout
+    while time.time() < end:
+        nodes = find_label_nodes(needles)
+        if nodes:
+            nodes.sort(key=lambda item: item[0].attrib.get("clickable") != "true")
+            _, (x, y), blob = nodes[0]
+            log(f"Tapping visible UI label: {blob[:120]}")
+            tap_xy(x, y)
+            time.sleep(2)
+            return True
+        time.sleep(2)
+    return False
 
 def tap_xy(x, y):
     adb("shell", "input", "tap", str(x), str(y))
