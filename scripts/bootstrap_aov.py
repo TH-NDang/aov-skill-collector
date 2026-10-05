@@ -609,10 +609,19 @@ def handle_google_login():
     verification_saved = False
     last_number_match = None
     last_heartbeat = 0
+    account_seen = False
     while time.time() < end:
-        # Read and report the verification screen FIRST. Do not run any
-        # post-login/setup automation while a verification challenge is visible,
-        # otherwise an unrelated "phone number"/setup handler can interfere.
+        # Strongest success signal: once Android AccountManager contains a real
+        # Google account, phone verification has completed even if the old
+        # verification WebView has not visually refreshed yet.
+        if has_google_account():
+            if not account_seen:
+                account_seen = True
+                log("Google account appeared in Android AccountManager; phone verification is complete.")
+            finish_google_post_login_setup(timeout=20)
+            screenshot("05-playstore-signed-in")
+            return True
+
         verification_blob = ui_text()
         verification_lower = verification_blob.lower() if verification_blob else ""
 
@@ -622,10 +631,18 @@ def handle_google_login():
                 previous_number=last_number_match,
             )
 
+        # Keep this list strict. Generic words such as "security", "confirm" or
+        # "verify" also occur on normal post-login/setup pages and previously
+        # caused the workflow to wait forever after successful phone approval.
         verification_markers = [
-            "2-step", "check your phone", "verify", "xác minh",
-            "kiểm tra điện thoại", "confirm", "security",
-            "number match", "choose the number", "select the number",
+            "2-step verification",
+            "check your phone",
+            "tap yes on your phone",
+            "choose the number",
+            "select the number",
+            "number match",
+            "kiểm tra điện thoại",
+            "chọn số",
             "enter the number shown on your phone",
             "enter the number shown on your device",
         ]
@@ -636,13 +653,12 @@ def handle_google_login():
                 verification_saved = True
                 log("Google verification appears to be required. Keep this job open while approving it on your trusted device.")
         else:
-            # Only after the verification challenge disappears do we process
-            # optional Google setup screens that may or may not exist.
+            # Verification disappeared. Handle whichever post-login setup page
+            # actually exists; many of these pages are optional and may be absent.
             finish_google_post_login_setup(timeout=5)
 
             if play_store_signed_in():
-                log("Google sign-in accepted; finishing any post-login setup screens.")
-                finish_google_post_login_setup()
+                log("Google sign-in/setup completed.")
                 screenshot("05-playstore-signed-in")
                 return True
 
