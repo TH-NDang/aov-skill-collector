@@ -765,6 +765,7 @@ def handle_google_login():
     challenge_seen = False
     unknown_since = None
     unknown_evidence_saved = False
+    unknown_recovery_attempted = False
     while time.time() < end:
         # Strongest success signal: once Android AccountManager contains a real
         # Google account, phone verification has completed even if the old
@@ -841,12 +842,55 @@ def handle_google_login():
                     screenshot("google-post-verify-unknown")
                     dump_ui("google-post-verify-unknown")
                     unknown_evidence_saved = True
+
+                # If Google verification closes back to Pixel Launcher and no
+                # Google account appears, do not wait for the full 15-minute
+                # timeout. Give the account service a short grace period, then
+                # reopen Play Store once to determine whether sign-in actually
+                # completed or the account-add flow was abandoned.
+                if (
+                    not unknown_recovery_attempted
+                    and unknown_since is not None
+                    and time.time() - unknown_since >= 20
+                    and "nexuslauncher" in focus_lower
+                    and google_account_present_diagnostic() == 0
+                ):
+                    unknown_recovery_attempted = True
+                    log("Post-verification returned to Pixel Launcher without a Google account; reopening Play Store to verify completion.")
+                    adb("shell", "am", "force-stop", PKG_PLAY, timeout=30)
+                    time.sleep(1)
+                    adb("shell", "monkey", "-p", PKG_PLAY, "-c", "android.intent.category.LAUNCHER", "1", timeout=30)
+                    time.sleep(8)
+
+                    if has_google_account() or play_store_signed_in():
+                        log("Google sign-in completed after Play Store recovery.")
+                        screenshot("05-playstore-signed-in")
+                        return True
+
+                    recovered_blob = ui_text().lower()
+                    if any(x in recovered_blob for x in [
+                        "sign in to find the latest android apps",
+                        "sign in",
+                        "đăng nhập",
+                    ]):
+                        screenshot("google-approved-but-account-not-added")
+                        (OUT / "google-login-state.txt").write_text(
+                            "GOOGLE_APPROVED_BUT_ACCOUNT_NOT_ADDED\n",
+                            encoding="utf-8",
+                        )
+                        log("Phone approval completed, but Android did not add the Google account; Play Store returned to Sign in.")
+                        return False
             else:
                 unknown_since = None
 
-            # Verification disappeared. Handle whichever post-login setup page
-            # actually exists; many of these pages are optional and may be absent.
-            finish_google_post_login_setup(timeout=5)
+            # Only run setup-page handling when the foreground is still part of
+            # Google/Play Store. Running it on Pixel Launcher just wastes time.
+            if (
+                "com.google.android.gms" in focus_lower
+                or PKG_PLAY in focus_lower
+                or current_state != "UNKNOWN"
+            ):
+                finish_google_post_login_setup(timeout=5)
 
             if play_store_signed_in():
                 log("Google sign-in/setup completed.")
