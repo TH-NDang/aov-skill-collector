@@ -628,13 +628,20 @@ def launch_aov():
         log("Dismissed Android 'Viewing full screen' hint.")
         time.sleep(3)
 
-    # Handle Android permission/system prompts only.
+    # Handle Android permission/system prompts and dismiss optional onboarding.
     end = time.time() + 60
     while time.time() < end:
-        hit = tap_needles([
+        hit = False
+
+        if tap_exact_text(["Cancel", "Hủy"], timeout=1):
+            log("Dismissed optional onboarding prompt.")
+            hit = True
+
+        if tap_needles([
             "while using the app", "only this time", "allow", "cho phép",
             "while using", "khi dùng ứng dụng"
-        ], timeout=2)
+        ], timeout=2):
+            hit = True
 
         if tap_exact_text(["Got it", "Đã hiểu", "OK"], timeout=1):
             log("Dismissed remaining Android full-screen/system hint.")
