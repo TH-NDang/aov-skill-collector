@@ -1129,63 +1129,58 @@ def wait_for_aov_scene_ready():
 
 
 def attempt_garena_login():
-    log("Waiting for AOV resource/update phase to finish before attempting Garena login.")
+    log("Attempting Garena login without emulator-detection bypasses.")
 
-    # AOV's first launch can spend several minutes downloading Unity resources.
-    # During this phase UIAutomator usually exposes only UnitySurfaceView. Do not
-    # treat the package/resource-id containing 'garena' as the Garena login button.
-    end = time.time() + GAME_READY_TIMEOUT
-    next_progress_shot = time.time()
-    progress_index = 1
-    last_unity_only_log = 0
+    # First wait for the first-launch resource/update phase to settle. Unity
+    # exposes almost no accessibility text during this phase, so use screen
+    # stability plus periodic screenshots instead of assuming a fixed delay.
+    resource_state = wait_for_aov_scene_ready()
+    log(f"AOV pre-login scene state: {resource_state}")
+
+    if resource_state in [
+        "AOV_LEFT_FOREGROUND_DURING_RESOURCE_WAIT",
+        "AOV_RESOURCE_WAIT_TIMEOUT",
+    ]:
+        (OUT / "aov-login-state.txt").write_text(resource_state + "\n", encoding="utf-8")
+        return resource_state
+
+    # The loading phase may finish into another Unity-rendered scene whose
+    # buttons are still not exposed to UIAutomator. Give that scene time to
+    # transition, but only act on human-visible labels/text fields.
+    end = time.time() + 180
     garena_clicked = False
+    next_progress_shot = time.time() + 45
+    progress_index = 1
 
     while time.time() < end:
         if not package_is_foreground(PKG_AOV):
-            screenshot("09-aov-left-foreground")
-            (OUT / "aov-login-state.txt").write_text(
-                "AOV_LEFT_FOREGROUND_DURING_RESOURCE_WAIT\n",
-                encoding="utf-8",
-            )
-            log("AOV left foreground while waiting for the resource/login scene.")
-            return "AOV_LEFT_FOREGROUND_DURING_RESOURCE_WAIT"
+            screenshot("09-aov-left-foreground-after-resource-wait")
+            return "AOV_LEFT_FOREGROUND_BEFORE_LOGIN"
 
-        # Only safe/system-level prompts here. Avoid generic game-text clicking
-        # while the Unity scene is still downloading resources.
         tap_exact_text(["Cancel", "Hủy"], timeout=1)
         tap_exact_text(["Got it", "Đã hiểu", "OK"], timeout=1)
+        tap_exact_text(
+            ["Agree", "Đồng ý", "Accept", "Xác nhận", "Continue", "Tiếp tục"],
+            timeout=1,
+        )
 
         edits = edit_nodes()
         if edits:
-            log(f"AOV login form became accessible with {len(edits)} text field(s).")
+            log(f"AOV login form is accessible with {len(edits)} text field(s).")
             break
 
-        garena_nodes = find_visible_label_nodes(["garena"])
+        garena_nodes = find_label_nodes(["garena"])
         if garena_nodes:
-            n, (x, y), label = garena_nodes[0]
-            log(f"Garena login label became accessible: {label[:120]}")
+            garena_nodes.sort(key=lambda item: item[0].attrib.get("clickable") != "true")
+            _, (x, y), label = garena_nodes[0]
+            log(f"Garena visible label detected: {label[:120]}")
             tap_xy(x, y)
             time.sleep(3)
             garena_clicked = True
             break
 
-        # Useful diagnostic: if only the Unity surface is exposed, the app is
-        # still game-rendered and there is no trustworthy accessible login target.
-        root = dump_ui("latest-ui")
-        if root is not None:
-            blobs = [node_blob(n) for n in root.iter("node")]
-            unity_nodes = [b for b in blobs if "unitysurfaceview" in b]
-            visible_labels = [
-                visible_label_blob(n) for n in root.iter("node")
-                if visible_label_blob(n)
-            ]
-            if unity_nodes and not visible_labels and time.time() - last_unity_only_log > 60:
-                remaining = max(0, int(end - time.time()))
-                log(f"AOV UI is Unity-only; likely loading/resources. Waiting... {remaining}s remaining.")
-                last_unity_only_log = time.time()
-
         if time.time() >= next_progress_shot:
-            screenshot(f"09-aov-resource-progress-{progress_index}")
+            screenshot(f"09-aov-login-wait-{progress_index}")
             progress_index += 1
             next_progress_shot = time.time() + 45
 
@@ -1194,6 +1189,7 @@ def attempt_garena_login():
     screenshot("09-aov-login-area")
     dump_ui("aov-login-area")
 
+    # Some Garena login screens expose Android/WebView EditText fields.
     edits = edit_nodes()
     if len(edits) >= 2:
         log("Two login text fields are accessible via UI automation.")
@@ -1204,7 +1200,7 @@ def attempt_garena_login():
         tap_xy(x2, y2)
         focused_type(AOV_PASSWORD)
         screenshot("10-garena-filled")
-        tap_visible_label_needles(["login", "đăng nhập"], timeout=20)
+        tap_label_needles(["login", "đăng nhập"], timeout=20)
         time.sleep(30)
         screenshot("11-aov-after-login-submit")
         dump_ui("aov-after-login-submit")
@@ -1215,14 +1211,14 @@ def attempt_garena_login():
         _, (x, y), _ = edits[0]
         tap_xy(x, y)
         focused_type(AOV_USERNAME)
-        if tap_visible_label_needles(["next", "tiếp theo", "continue", "tiếp tục"], timeout=15):
+        if tap_label_needles(["next", "tiếp theo", "continue", "tiếp tục"], timeout=15):
             time.sleep(3)
             edits2 = edit_nodes()
             if edits2:
                 _, (x2, y2), _ = edits2[-1]
                 tap_xy(x2, y2)
                 focused_type(AOV_PASSWORD)
-                tap_visible_label_needles(["login", "đăng nhập"], timeout=20)
+                tap_label_needles(["login", "đăng nhập"], timeout=20)
                 time.sleep(30)
                 screenshot("11-aov-after-login-submit")
                 return "AOV_LOGIN_ATTEMPTED"
@@ -1230,12 +1226,16 @@ def attempt_garena_login():
     if garena_clicked:
         return "GARENA_LOGIN_UI_NOT_ACCESSIBLE"
 
-    (OUT / "aov-login-state.txt").write_text(
-        "AOV_LOGIN_SCREEN_NOT_ACCESSIBLE_AFTER_RESOURCE_WAIT\n",
-        encoding="utf-8",
-    )
-    log("Timed out waiting for an accessible Garena/login scene after AOV resource loading.")
-    return "AOV_LOGIN_SCREEN_NOT_ACCESSIBLE_AFTER_RESOURCE_WAIT"
+    # Do not tap the Unity surface or arbitrary coordinates. Preserve the final
+    # scene so the next iteration can decide whether a coordinate strategy is
+    # appropriate from a real login screenshot.
+    if resource_state == "READY_STABLE":
+        state = "GARENA_BUTTON_NOT_ACCESSIBLE_AFTER_RESOURCE_WAIT"
+    else:
+        state = "GARENA_BUTTON_NOT_ACCESSIBLE"
+    (OUT / "aov-login-state.txt").write_text(state + "\n", encoding="utf-8")
+    return state
+
 
 def main():
     missing = [name for name, value in {
