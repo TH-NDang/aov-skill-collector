@@ -17,7 +17,7 @@ concurrency:
 jobs:
   bootstrap-aov:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 75
 
     env:
       GOOGLE_EMAIL: ${{ secrets.GOOGLE_EMAIL }}
@@ -26,6 +26,7 @@ jobs:
       AOV_PASSWORD: ${{ secrets.AOV_PASSWORD }}
       GOOGLE_VERIFY_TIMEOUT: "900"
       AOV_INSTALL_TIMEOUT: "1200"
+      AOV_GAME_READY_TIMEOUT: "900"
 
     steps:
       - name: Checkout
