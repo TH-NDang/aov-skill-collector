@@ -550,6 +550,33 @@ def wait_for_google_identifier_screen(timeout=90):
     return "TIMEOUT"
 
 
+def classify_google_auth_state(blob):
+    lower = (blob or "").lower()
+    states = [
+        ("NUMBER_MATCH", ["choose the number", "select the number", "number match", "chọn số"]),
+        ("CHECK_PHONE", ["check your phone", "tap yes on your phone", "kiểm tra điện thoại"]),
+        ("GOOGLE_SERVICES", ["google services"]),
+        ("TERMS", ["terms of service", "privacy policy", "điều khoản"]),
+        ("BACKUP", ["back up", "backup", "google one"]),
+        ("PHONE_SETUP", ["add a phone number", "use your number"]),
+        ("PAYMENT_SETUP", ["set up payment", "payment method"]),
+        ("PLAY_GAMES_PROFILE", ["create a play games profile", "sync progress and achievements"]),
+        ("PLAY_STORE_HOME", ["search apps & games", "search apps", "manage apps"]),
+    ]
+    for name, markers in states:
+        if any(marker in lower for marker in markers):
+            return name
+    if "com.google.android.gms" in resumed_activity().lower():
+        return "GOOGLE_ACCOUNT_UI"
+    return "UNKNOWN"
+
+
+def google_account_present_diagnostic():
+    # Keep account names private; only return a boolean/count-like diagnostic.
+    out = adb("shell", "dumpsys", "account", timeout=60)
+    matches = re.findall(r"Account \{name=[^,}]+,\s*type=com\.google\}", out)
+    return len(matches)
+
 def handle_google_login():
     log("Opening Play Store...")
     adb("shell", "monkey", "-p", PKG_PLAY, "-c", "android.intent.category.LAUNCHER", "1")
@@ -633,6 +660,7 @@ def handle_google_login():
     verification_saved = False
     last_number_match = None
     last_heartbeat = 0
+    last_state = None
     account_seen = False
     while time.time() < end:
         # Strongest success signal: once Android AccountManager contains a real
@@ -648,6 +676,12 @@ def handle_google_login():
 
         verification_blob = ui_text()
         verification_lower = verification_blob.lower() if verification_blob else ""
+
+        current_state = classify_google_auth_state(verification_blob)
+        if current_state != last_state:
+            account_count = google_account_present_diagnostic()
+            log(f"GOOGLE_AUTH_STATE={current_state}; google_accounts={account_count}")
+            last_state = current_state
 
         if verification_blob:
             last_number_match = report_google_verification(
@@ -689,7 +723,11 @@ def handle_google_login():
         now = time.time()
         if now - last_heartbeat >= 30:
             remaining = max(0, int(end - now))
-            log(f"Google verification wait still active; {remaining}s remaining.")
+            account_count = google_account_present_diagnostic()
+            log(
+                f"Google verification wait still active; {remaining}s remaining; "
+                f"state={current_state}; google_accounts={account_count}."
+            )
             last_heartbeat = now
 
         time.sleep(5)
