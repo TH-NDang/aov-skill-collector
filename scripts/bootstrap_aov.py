@@ -550,6 +550,23 @@ def wait_for_google_identifier_screen(timeout=90):
     return "TIMEOUT"
 
 
+def current_focus_component():
+    # Return only package/activity metadata; never log account text or credentials.
+    activity = resumed_activity()
+    m = re.search(r"([A-Za-z0-9._]+/[A-Za-z0-9._$]+)", activity)
+    if m:
+        return m.group(1)
+
+    windows = adb("shell", "dumpsys", "window", "windows", timeout=60)
+    for line in windows.splitlines():
+        if "mCurrentFocus" in line or "mFocusedApp" in line:
+            m = re.search(r"([A-Za-z0-9._]+/[A-Za-z0-9._$]+)", line)
+            if m:
+                return m.group(1)
+
+    return "UNKNOWN"
+
+
 def classify_google_auth_state(blob):
     lower = (blob or "").lower()
     states = [
@@ -662,6 +679,9 @@ def handle_google_login():
     last_heartbeat = 0
     last_state = None
     account_seen = False
+    challenge_seen = False
+    unknown_since = None
+    unknown_evidence_saved = False
     while time.time() < end:
         # Strongest success signal: once Android AccountManager contains a real
         # Google account, phone verification has completed even if the old
@@ -688,6 +708,8 @@ def handle_google_login():
                 verification_blob,
                 previous_number=last_number_match,
             )
+            if last_number_match is not None:
+                challenge_seen = True
 
         # Keep this list strict. Generic words such as "security", "confirm" or
         # "verify" also occur on normal post-login/setup pages and previously
@@ -707,10 +729,38 @@ def handle_google_login():
         verification_visible = any(x in verification_lower for x in verification_markers)
 
         if verification_visible:
+            challenge_seen = True
+            unknown_since = None
             if not verification_saved:
                 verification_saved = True
                 log("Google verification appears to be required. Keep this job open while approving it on your trusted device.")
         else:
+            # After a real number-match/check-phone challenge has been seen,
+            # returning to Play Store is a strong completion signal even if the
+            # transient Google WebView becomes unreadable to UIAutomator.
+            focus = current_focus_component()
+            focus_lower = focus.lower()
+            if (
+                challenge_seen
+                and PKG_PLAY in focus_lower
+                and "sign in" not in verification_lower
+                and "đăng nhập" not in verification_lower
+            ):
+                log(f"Google verification completed; foreground returned to Play Store ({focus}).")
+                screenshot("05-playstore-signed-in")
+                return True
+
+            if challenge_seen and current_state == "UNKNOWN":
+                if unknown_since is None:
+                    unknown_since = time.time()
+                    log(f"Post-verification UI became UNKNOWN; foreground={focus}.")
+                if not unknown_evidence_saved:
+                    screenshot("google-post-verify-unknown")
+                    dump_ui("google-post-verify-unknown")
+                    unknown_evidence_saved = True
+            else:
+                unknown_since = None
+
             # Verification disappeared. Handle whichever post-login setup page
             # actually exists; many of these pages are optional and may be absent.
             finish_google_post_login_setup(timeout=5)
