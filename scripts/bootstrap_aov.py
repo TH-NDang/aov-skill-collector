@@ -328,8 +328,9 @@ def wait_for_package(pkg, timeout):
     while time.time() < end:
         if package_installed(pkg):
             return True
-        # Handle occasional Play Store confirmation dialogs.
-        tap_needles(["continue", "tiếp tục", "ok", "accept", "chấp nhận"], timeout=2)
+        # Use exact labels here. Substring matching "ok" previously matched
+        # FaceboOK and navigated away from the AOV listing.
+        tap_exact_text(["Continue", "Tiếp tục", "OK", "Accept", "Chấp nhận"], timeout=2)
         if time.time() - last_shot > 90:
             screenshot("install-progress")
             last_shot = time.time()
@@ -735,19 +736,17 @@ def install_aov():
 
 def launch_aov():
     log("Launching AOV...")
-    out = adb("shell", "monkey", "-p", PKG_AOV, "-c", "android.intent.category.LAUNCHER", "1", timeout=60)
+    adb("shell", "monkey", "-p", PKG_AOV, "-c", "android.intent.category.LAUNCHER", "1", timeout=60)
     log("Launch command sent.")
 
-    # The first immersive/full-screen app launch on a fresh Android image can
-    # show the system "Viewing full screen" hint over the game. It is separate
-    # from AOV and blocks the game UI until "Got it" is pressed.
     time.sleep(8)
     if tap_exact_text(["Got it", "Đã hiểu", "OK"], timeout=12):
         log("Dismissed Android 'Viewing full screen' hint.")
         time.sleep(3)
 
-    # Handle Android permission/system prompts and dismiss optional onboarding.
-    end = time.time() + 60
+    # Handle Android permission/system prompts and optional Google Play Games
+    # onboarding while also checking whether AOV really stays in foreground.
+    end = time.time() + 45
     while time.time() < end:
         hit = False
 
@@ -765,12 +764,69 @@ def launch_aov():
             log("Dismissed remaining Android full-screen/system hint.")
             hit = True
 
+        if PKG_AOV in resumed_activity():
+            # Give the game a little time to settle after it first becomes foreground.
+            time.sleep(8)
+            break
+
         if not hit:
             time.sleep(2)
 
+    # If monkey returned to the launcher, retry using the app's resolved launcher
+    # activity. This is a normal launch retry, not an emulator-detection bypass.
+    if PKG_AOV not in resumed_activity():
+        log("AOV is not in foreground after the first launch attempt; retrying the resolved launcher activity.")
+        resolved = adb(
+            "shell", "cmd", "package", "resolve-activity", "--brief",
+            "-c", "android.intent.category.LAUNCHER", PKG_AOV,
+            timeout=60,
+        )
+        components = [line.strip() for line in resolved.splitlines() if "/" in line]
+        if components:
+            component = components[-1]
+            start_out = adb("shell", "am", "start", "-W", "-n", component, timeout=60)
+            for line in start_out.splitlines():
+                if line.startswith(("Status:", "LaunchState:", "Activity:", "TotalTime:")):
+                    log("AOV launch: " + line)
+            time.sleep(12)
+
     screenshot("08-aov-launched")
     dump_ui("aov-launched")
-    return package_installed(PKG_AOV)
+
+    foreground = PKG_AOV in resumed_activity()
+    pid = adb("shell", "pidof", PKG_AOV, timeout=30).strip()
+
+    if foreground:
+        log("AOV is confirmed in foreground.")
+        return True
+
+    state = "AOV_EXITED_AFTER_LAUNCH" if not pid else "AOV_NOT_FOREGROUND"
+    (OUT / "aov-launch-state.txt").write_text(state + "\n", encoding="utf-8")
+
+    # Save focused crash/activity diagnostics without dumping account data.
+    raw = adb("logcat", "-d", "-t", "400", timeout=60)
+    keep = []
+    markers = [
+        PKG_AOV.lower(),
+        "androidruntime",
+        "fatal exception",
+        "force finishing activity",
+        "has died",
+        "crash",
+        "sigsegv",
+        "sigabrt",
+        "abort message",
+    ]
+    for line in raw.splitlines():
+        lower = line.lower()
+        if any(marker in lower for marker in markers):
+            keep.append(line)
+    (OUT / "aov-launch-diagnostics.txt").write_text(
+        "\n".join(keep[-250:]) + "\n",
+        encoding="utf-8",
+    )
+    log(f"AOV did not remain in foreground after launch: {state}.")
+    return False
 
 def attempt_garena_login():
     log("Attempting Garena login without emulator-detection bypasses.")
@@ -863,7 +919,9 @@ def main():
 
     log("AOV installed successfully.")
     if not launch_aov():
-        write_result("AOV_LAUNCH_FAILED")
+        state_file = OUT / "aov-launch-state.txt"
+        state = state_file.read_text(encoding="utf-8").strip() if state_file.exists() else "AOV_LAUNCH_FAILED"
+        write_result(state, "AOV was installed but did not remain active after launch. Diagnostics were saved.")
         return 0
 
     state = attempt_garena_login()
