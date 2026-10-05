@@ -661,6 +661,7 @@ def attempt_garena_login():
     end = time.time() + 240
     garena_clicked = False
     while time.time() < end:
+        tap_exact_text(["Cancel", "Hủy"], timeout=1)
         tap_needles(["agree", "đồng ý", "accept", "xác nhận", "continue", "tiếp tục"], timeout=2)
         if tap_needles(["garena"], timeout=2):
             garena_clicked = True
