@@ -425,6 +425,91 @@ def play_store_signed_in():
     # splash/login screen is also com.android.vending.
     return False
 
+def dismiss_system_anr_dialog():
+    blob = ui_text()
+    lower = blob.lower()
+    if not any(x in lower for x in [
+        "isn't responding",
+        "is not responding",
+        "không phản hồi",
+    ]):
+        return False
+
+    log("Android app-not-responding dialog detected.")
+    if tap_exact_text(["Wait", "Chờ"], timeout=3):
+        log("Tapped Wait on Android ANR dialog.")
+        time.sleep(3)
+        return True
+
+    if tap_exact_text(["Close app", "Đóng ứng dụng"], timeout=2):
+        log("Closed the unresponsive app from Android ANR dialog.")
+        time.sleep(3)
+        return True
+
+    return False
+
+
+def wait_for_google_identifier_screen(timeout=90):
+    end = time.time() + timeout
+    sign_in_attempts = 0
+
+    while time.time() < end:
+        if dismiss_system_anr_dialog():
+            adb("shell", "monkey", "-p", PKG_PLAY, "-c", "android.intent.category.LAUNCHER", "1")
+            time.sleep(5)
+            continue
+
+        blob = ui_text()
+        lower = blob.lower()
+
+        if play_store_signed_in():
+            return "SIGNED_IN"
+
+        if any(x in lower for x in [
+            "email or phone",
+            "forgot email",
+            "create account",
+            "email hoặc số điện thoại",
+        ]):
+            return "IDENTIFIER"
+
+        if any(x in lower for x in [
+            "sign in with ease",
+            "search for accounts connected to this phone number",
+        ]):
+            handle_google_signin_intro()
+            time.sleep(3)
+            continue
+
+        if "com.google.android.gms" in resumed_activity().lower():
+            # We are inside Google's account-add UI, so it is safe to handle
+            # the informational account dialog here.
+            dismiss_google_account_info_dialog()
+            time.sleep(3)
+            continue
+
+        if any(x in lower for x in [
+            "sign in to find the latest android apps",
+            "sign in",
+            "đăng nhập",
+        ]):
+            if tap_exact_text(["Sign in", "Đăng nhập"], timeout=4):
+                sign_in_attempts += 1
+                log(f"Play Store sign-in attempt #{sign_in_attempts}.")
+                time.sleep(6)
+                continue
+
+        # The Play Store may have restarted after a launcher/system ANR.
+        # Re-open it periodically and retry instead of assuming Google login is open.
+        if sign_in_attempts == 0 or sign_in_attempts % 2 == 0:
+            adb("shell", "monkey", "-p", PKG_PLAY, "-c", "android.intent.category.LAUNCHER", "1")
+            time.sleep(4)
+
+        time.sleep(2)
+
+    return "TIMEOUT"
+
+
 def handle_google_login():
     log("Opening Play Store...")
     adb("shell", "monkey", "-p", PKG_PLAY, "-c", "android.intent.category.LAUNCHER", "1")
@@ -435,15 +520,16 @@ def handle_google_login():
         log("Play Store already appears signed in.")
         return True
 
-    tap_needles(["sign in", "đăng nhập"], timeout=20)
-    time.sleep(5)
+    state = wait_for_google_identifier_screen(timeout=90)
+    if state == "SIGNED_IN":
+        log("Play Store became signed in while recovering the login flow.")
+        return True
+    if state != "IDENTIFIER":
+        log("Could not reach the Google email/phone screen after Play Store recovery.")
+        (OUT / "google-login-state.txt").write_text("IDENTIFIER_SCREEN_NOT_REACHED\n", encoding="utf-8")
+        screenshot("02-google-login-not-reached")
+        return False
 
-    handle_google_signin_intro()
-
-    # Important: Google can put a modal saying "Your device works better with
-    # a Google Account" over the account-add page. Close it before touching
-    # the email field.
-    dismiss_google_account_info_dialog()
     screenshot("02-google-login")
 
     # Email / identifier.
