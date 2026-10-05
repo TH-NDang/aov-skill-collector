@@ -1022,6 +1022,112 @@ def launch_aov():
     log(f"AOV did not remain in foreground after launch: {state}.")
     return False
 
+def capture_screen_samples(step=48):
+    raw = subprocess.run(
+        ["adb", "exec-out", "screencap"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    ).stdout
+    if len(raw) < 16:
+        return None
+
+    w = int.from_bytes(raw[0:4], "little")
+    h = int.from_bytes(raw[4:8], "little")
+    if w <= 0 or h <= 0 or w > 10000 or h > 10000:
+        return None
+
+    pixel_bytes = w * h * 4
+    if len(raw) >= 16 + pixel_bytes:
+        offset = 16
+    elif len(raw) >= 12 + pixel_bytes:
+        offset = 12
+    else:
+        return None
+
+    full = []
+    bottom = []
+    bottom_start = int(h * 0.65)
+    for y in range(0, h, step):
+        row = offset + y * w * 4
+        for x in range(0, w, step):
+            i = row + x * 4
+            if i + 2 >= len(raw):
+                continue
+            rgb = (raw[i], raw[i + 1], raw[i + 2])
+            full.extend(rgb)
+            if y >= bottom_start:
+                bottom.extend(rgb)
+
+    return full, bottom
+
+
+def sample_diff(a, b):
+    if not a or not b or len(a) != len(b):
+        return 1.0
+    total = sum(abs(x - y) for x, y in zip(a, b))
+    return total / (len(a) * 255.0)
+
+
+def wait_for_aov_scene_ready():
+    log(
+        f"Waiting up to {AOV_RESOURCE_TIMEOUT}s for AOV resource loading/scene transition "
+        f"before attempting login."
+    )
+    start = time.time()
+    end = start + AOV_RESOURCE_TIMEOUT
+    previous = None
+    stable_count = 0
+    next_shot = start + 30
+    shot_index = 1
+
+    while time.time() < end:
+        if not package_is_foreground(PKG_AOV):
+            screenshot("09-aov-left-foreground")
+            return "AOV_LEFT_FOREGROUND_DURING_RESOURCE_WAIT"
+
+        # If a real visible login/provider label is exposed, the scene is ready.
+        if find_label_nodes(["garena", "login", "đăng nhập"]):
+            log("A visible login/provider label is available; AOV scene is ready.")
+            screenshot("09-aov-scene-ready")
+            return "READY_ACCESSIBLE"
+
+        current = capture_screen_samples()
+        elapsed = time.time() - start
+
+        if current is not None and previous is not None and elapsed >= AOV_RESOURCE_MIN_WAIT:
+            full_diff = sample_diff(previous[0], current[0])
+            bottom_diff = sample_diff(previous[1], current[1])
+
+            if full_diff < 0.018 and bottom_diff < 0.025:
+                stable_count += 1
+            else:
+                stable_count = 0
+
+            log(
+                f"AOV scene stability: elapsed={int(elapsed)}s "
+                f"full_diff={full_diff:.4f} bottom_diff={bottom_diff:.4f} "
+                f"stable={stable_count}/3"
+            )
+
+            if stable_count >= 3:
+                screenshot("09-aov-scene-stable")
+                log("AOV screen has been stable long enough to stop treating it as an active resource-loading transition.")
+                return "READY_STABLE"
+
+        if current is not None:
+            previous = current
+
+        if time.time() >= next_shot:
+            screenshot(f"09-aov-resource-progress-{shot_index}")
+            shot_index += 1
+            next_shot = time.time() + 45
+
+        time.sleep(15)
+
+    screenshot("09-aov-resource-wait-timeout")
+    return "AOV_RESOURCE_WAIT_TIMEOUT"
+
+
 def attempt_garena_login():
     log("Waiting for AOV resource/update phase to finish before attempting Garena login.")
 
