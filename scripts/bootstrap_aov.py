@@ -436,7 +436,18 @@ def dismiss_system_anr_dialog():
         return False
 
     log("Android app-not-responding dialog detected.")
-    if tap_exact_text(["Wait", "Chờ"], timeout=3):
+
+    # Pixel Launcher can get stuck in a repeated ANR loop on the hosted
+    # emulator. Waiting does not recover it; close the launcher and keep the
+    # foreground Play Store flow alive.
+    if "pixel launcher" in lower:
+        if tap_exact_text(["Close app", "Đóng ứng dụng"], timeout=3):
+            log("Closed unresponsive Pixel Launcher.")
+            time.sleep(4)
+            return True
+
+    # For other apps, try Wait once before falling back to Close app.
+    if tap_exact_text(["Wait", "Chờ"], timeout=2):
         log("Tapped Wait on Android ANR dialog.")
         time.sleep(3)
         return True
@@ -455,8 +466,13 @@ def wait_for_google_identifier_screen(timeout=90):
 
     while time.time() < end:
         if dismiss_system_anr_dialog():
+            # Give Android a moment to restart the launcher process in the
+            # background, then explicitly bring Play Store back to foreground.
+            time.sleep(2)
+            adb("shell", "am", "force-stop", PKG_PLAY, timeout=30)
+            time.sleep(1)
             adb("shell", "monkey", "-p", PKG_PLAY, "-c", "android.intent.category.LAUNCHER", "1")
-            time.sleep(5)
+            time.sleep(6)
             continue
 
         blob = ui_text()
