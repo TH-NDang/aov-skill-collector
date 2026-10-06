@@ -475,16 +475,19 @@ def start_aov_like_launcher():
 def save_aov_exit_diagnostics(name):
     # Why did AOV leave the foreground? ApplicationExitInfo (Android 11+)
     # records the exit reason (crash, native crash, ANR, low memory, ...).
+    # Native crash details (abort message, backtrace) live in the logcat
+    # crash buffer and in dropbox; the main buffer is quickly flooded by our
+    # own uiautomator calls.
     pid = aov_pid()
     exit_info = adb("shell", "dumpsys", "activity", "exit-info", PKG_AOV, timeout=60)
-    raw = adb("logcat", "-d", "-t", "600", timeout=60)
+    crash_buf = adb("logcat", "-d", "-b", "crash", timeout=60)
+    tombstones = adb("shell", "dumpsys", "dropbox", "--print", "data_app_native_crash", timeout=60)
+    raw = adb("logcat", "-d", "-t", "2000", timeout=60)
     markers = [
         PKG_AOV.lower(),
-        "androidruntime",
         "fatal exception",
         "force finishing activity",
         "has died",
-        "crash",
         "sigsegv",
         "sigabrt",
         "abort message",
@@ -492,22 +495,34 @@ def save_aov_exit_diagnostics(name):
     ]
     keep = [line for line in raw.splitlines() if any(m in line.lower() for m in markers)]
 
-    # Also put the exit reason and crash lines in the job log itself (the
+    # Also put the exit reasons and crash lines in the job log itself (the
     # artifact is not always reachable). Job logs of a public repo are public,
     # so emails are redacted.
-    reason = next((l.strip() for l in exit_info.splitlines() if "reason=" in l), "")
-    detail = next((l.strip() for l in exit_info.splitlines() if "description=" in l), "")
-    log(f"AOV exit-info: {reason or '<none>'} {detail}".rstrip())
-    crash_markers = ["fatal signal", "abort message", "fatal exception", "has died", "force finishing", "backtrace"]
-    for line in [l for l in keep if any(m in l.lower() for m in crash_markers)][-12:]:
-        log("AOV logcat: " + EMAIL_RE.sub("<email>", line)[:220])
+    for line in exit_info.splitlines():
+        line = line.strip()
+        if line.startswith("timestamp=") or "reason=" in line:
+            log("AOV exit-info: " + line[:200])
+    crash_lines = [
+        line for line in crash_buf.splitlines()
+        if any(m in line.lower() for m in [
+            "fatal signal", "abort message", "cause:", ">>> ", "signal ",
+        ]) or re.search(r"#\d\d pc ", line)
+    ]
+    for line in crash_lines[:40]:
+        log("AOV crash: " + EMAIL_RE.sub("<email>", line)[:220])
+    if not crash_lines:
+        log("AOV crash: <no native crash in logcat crash buffer>")
 
     (OUT / f"{name}.txt").write_text(
         f"pid={pid or 'none'}\n"
         f"foreground={current_focus_component()}\n\n"
         "=== exit-info (latest first) ===\n"
         + "\n".join(exit_info.splitlines()[:80])
-        + "\n\n=== logcat (filtered) ===\n"
+        + "\n\n=== logcat crash buffer ===\n"
+        + "\n".join(crash_buf.splitlines()[-400:])
+        + "\n\n=== dropbox data_app_native_crash ===\n"
+        + "\n".join(tombstones.splitlines()[-400:])
+        + "\n\n=== logcat main (filtered) ===\n"
         + "\n".join(keep[-250:])
         + "\n",
         encoding="utf-8",
