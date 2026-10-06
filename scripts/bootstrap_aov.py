@@ -58,10 +58,23 @@ def screenshot(name):
         subprocess.run(["adb", "exec-out", "screencap", "-p"], stdout=f, stderr=subprocess.DEVNULL, check=False)
     return path
 
+LAST_DUMP_OUTPUT = ""
+
+def uiautomator_dump(remote="/sdcard/window.xml"):
+    # Delete the previous dump first. When uiautomator cannot get an idle
+    # screen (e.g. an autoplaying video) it writes nothing, and reading the old
+    # file would silently return a stale screen.
+    global LAST_DUMP_OUTPUT
+    adb("shell", "rm", "-f", remote, timeout=30)
+    LAST_DUMP_OUTPUT = adb("shell", "uiautomator", "dump", remote, timeout=60)
+    return subprocess.run(
+        ["adb", "exec-out", f"cat {remote} 2>/dev/null"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    ).stdout
+
 def dump_ui(name="window"):
-    remote = "/sdcard/window.xml"
-    adb("shell", "uiautomator", "dump", remote, timeout=60)
-    raw = subprocess.run(["adb", "exec-out", "cat", remote], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+    raw = uiautomator_dump()
     path = OUT / f"{name}.xml"
     path.write_bytes(raw)
     try:
@@ -200,13 +213,7 @@ def tap_fraction(xf, yf):
     tap_xy(x, y)
 
 def ui_text():
-    remote = "/sdcard/window.xml"
-    adb("shell", "uiautomator", "dump", remote, timeout=60)
-    raw = subprocess.run(
-        ["adb", "exec-out", "cat", remote],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    ).stdout
+    raw = uiautomator_dump()
     try:
         root = ET.fromstring(raw)
     except Exception:
@@ -431,13 +438,7 @@ def package_is_foreground(pkg):
         if ("mCurrentFocus" in line or "mFocusedApp" in line) and pkg in line:
             return True
 
-    remote = "/sdcard/foreground.xml"
-    adb("shell", "uiautomator", "dump", remote, timeout=60)
-    raw = subprocess.run(
-        ["adb", "exec-out", "cat", remote],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    ).stdout.decode("utf-8", errors="ignore")
+    raw = uiautomator_dump("/sdcard/foreground.xml").decode("utf-8", errors="ignore")
     return f'package="{pkg}"' in raw
 
 def package_installed(pkg):
@@ -1004,19 +1005,50 @@ def open_aov_listing():
     screenshot("06-aov-listing")
     dump_ui("aov-listing")
 
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+def log_visible_labels(tag, limit=40):
+    # Put what is on screen into the job log itself, so a failure can be
+    # diagnosed without downloading the artifact. Job logs of a public repo
+    # are public, so email addresses are redacted.
+    root = dump_ui(tag)
+    focus = current_focus_component()
+    if root is None:
+        log(f"{tag}: foreground={focus}; UI dump failed: {LAST_DUMP_OUTPUT[:160] or '<no output>'}")
+        return
+    labels = []
+    for n in root.iter("node"):
+        label = EMAIL_RE.sub("<email>", visible_label_blob(n))[:80]
+        if label and label not in labels:
+            labels.append(label)
+    log(f"{tag}: foreground={focus}; visible labels: " + (" | ".join(labels[:limit]) or "<none>"))
+
 def install_aov():
     if package_installed(PKG_AOV):
         log("AOV package is already installed.")
         return True
 
-    if not tap_needles(["install", "cài đặt"], timeout=25):
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        if attempt > 1:
+            if attempt == attempts:
+                adb("shell", "am", "force-stop", PKG_PLAY, timeout=30)
+                time.sleep(2)
+            log(f"Reopening AOV listing (attempt {attempt}/{attempts}).")
+            open_aov_listing()
+
+        if tap_needles(["install", "cài đặt"], timeout=25):
+            break
+
         blob = ui_text().lower()
-        screenshot("aov-install-button-not-found")
+        screenshot(f"aov-install-button-not-found-{attempt}")
+        log_visible_labels(f"aov-listing-attempt-{attempt}")
 
         if "sign in" in blob or "đăng nhập" in blob:
             (OUT / "aov-install-state.txt").write_text("PLAY_STORE_SIGN_IN_REQUIRED\n", encoding="utf-8")
             log("Play Store is still unauthenticated; AOV install cannot start.")
-        elif any(x in blob for x in [
+            return False
+        if any(x in blob for x in [
             "isn't available for your device",
             "not available for your device",
             "not compatible with your device",
@@ -1026,7 +1058,8 @@ def install_aov():
         ]):
             (OUT / "aov-install-state.txt").write_text("AOV_DEVICE_INCOMPATIBLE\n", encoding="utf-8")
             log("AOV appears unavailable/incompatible for this emulator device.")
-        elif any(x in blob for x in [
+            return False
+        if any(x in blob for x in [
             "not available in your country",
             "not available in your region",
             "không có sẵn ở quốc gia",
@@ -1034,9 +1067,20 @@ def install_aov():
         ]):
             (OUT / "aov-install-state.txt").write_text("AOV_REGION_UNAVAILABLE\n", encoding="utf-8")
             log("AOV appears unavailable for the Play Store region.")
-        else:
-            (OUT / "aov-install-state.txt").write_text("AOV_INSTALL_BUTTON_NOT_FOUND\n", encoding="utf-8")
-            log("AOV listing opened, but no recognized Install button/state was found.")
+            return False
+
+        # A freshly added account can get optional Play Store sheets (Play
+        # Protect, Play Points, payment setup) over the listing, or the listing
+        # may still be loading. Dismiss optional sheets and try again.
+        if tap_exact_text([
+            "Not now", "No thanks", "Skip", "Got it",
+            "Bỏ qua", "Không phải bây giờ", "Không, cảm ơn", "Đã hiểu",
+        ], timeout=3):
+            log("Dismissed an optional Play Store sheet over the AOV listing.")
+        time.sleep(15)
+    else:
+        (OUT / "aov-install-state.txt").write_text("AOV_INSTALL_BUTTON_NOT_FOUND\n", encoding="utf-8")
+        log(f"AOV listing opened {attempts} times, but no recognized Install button/state was found.")
         return False
 
     log(f"Install requested. Waiting up to {INSTALL_TIMEOUT}s for package {PKG_AOV}.")
