@@ -372,6 +372,21 @@ def setup_adb_ime():
         ADB_IME_READY = False
         log("ADB IME setup failed; native ADB text input will be used instead: " + str(exc).splitlines()[0])
 
+def restore_system_ime():
+    # The custom IME is only needed to enter credentials. Return to Gboard
+    # before Google's verification/setup phase to keep the Android account-add
+    # flow as close as possible to a normal device session.
+    preferred = "com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME"
+    listed = adb("shell", "ime", "list", "-s", timeout=60)
+    if preferred in listed:
+        adb("shell", "ime", "enable", preferred, timeout=60)
+        out = adb("shell", "ime", "set", preferred, timeout=60)
+        log("Restored system Google keyboard before verification.")
+        return True
+    log("System Google keyboard was not available to restore.")
+    return False
+
+
 def input_text(value):
     if ADB_IME_READY:
         encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
@@ -753,6 +768,7 @@ def handle_google_login():
         time.sleep(2)
 
     time.sleep(5)
+    restore_system_ime()
     (OUT / "google-login-state.txt").write_text("CREDENTIALS_SUBMITTED\n", encoding="utf-8")
 
     log(f"Waiting up to {VERIFY_TIMEOUT}s for Google verification / sign-in completion.")
@@ -810,7 +826,11 @@ def handle_google_login():
             "enter the number shown on your phone",
             "enter the number shown on your device",
         ]
-        verification_visible = any(x in verification_lower for x in verification_markers)
+        current_number_match = extract_google_number_match(verification_blob) if verification_blob else None
+        verification_visible = (
+            current_number_match is not None
+            or any(x in verification_lower for x in verification_markers)
+        )
 
         if verification_visible:
             challenge_seen = True
@@ -1298,9 +1318,19 @@ def main():
     if not handle_google_login():
         state_file = OUT / "google-login-state.txt"
         state = state_file.read_text(encoding="utf-8").strip() if state_file.exists() else "GOOGLE_LOGIN_NOT_COMPLETED"
-        write_result(state,
-                     "Google sign-in did not complete. Screenshots/UI dumps were saved.")
-        return 0
+
+        if state == "GOOGLE_APPROVED_BUT_ACCOUNT_NOT_ADDED":
+            log("Google phone approval succeeded but the account-add transaction was abandoned; retrying sign-in once on the same emulator.")
+            time.sleep(8)
+            if not handle_google_login():
+                state = state_file.read_text(encoding="utf-8").strip() if state_file.exists() else "GOOGLE_LOGIN_NOT_COMPLETED"
+                write_result(state,
+                             "Google sign-in still did not complete after one same-emulator retry. Evidence was saved.")
+                return 0
+        else:
+            write_result(state,
+                         "Google sign-in did not complete. Screenshots/UI dumps were saved.")
+            return 0
 
     open_aov_listing()
     if not install_aov():
