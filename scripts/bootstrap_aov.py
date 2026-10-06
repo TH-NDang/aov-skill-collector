@@ -491,6 +491,17 @@ def save_aov_exit_diagnostics(name):
         "lowmemorykiller",
     ]
     keep = [line for line in raw.splitlines() if any(m in line.lower() for m in markers)]
+
+    # Also put the exit reason and crash lines in the job log itself (the
+    # artifact is not always reachable). Job logs of a public repo are public,
+    # so emails are redacted.
+    reason = next((l.strip() for l in exit_info.splitlines() if "reason=" in l), "")
+    detail = next((l.strip() for l in exit_info.splitlines() if "description=" in l), "")
+    log(f"AOV exit-info: {reason or '<none>'} {detail}".rstrip())
+    crash_markers = ["fatal signal", "abort message", "fatal exception", "has died", "force finishing", "backtrace"]
+    for line in [l for l in keep if any(m in l.lower() for m in crash_markers)][-12:]:
+        log("AOV logcat: " + EMAIL_RE.sub("<email>", line)[:220])
+
     (OUT / f"{name}.txt").write_text(
         f"pid={pid or 'none'}\n"
         f"foreground={current_focus_component()}\n\n"
