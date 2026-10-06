@@ -1132,6 +1132,52 @@ def sample_diff(a, b):
     return total / (len(a) * 255.0)
 
 
+def reopen_aov_after_external_prompt(reason):
+    log(f"Reopening AOV after external UI: {reason}.")
+    resolved = adb(
+        "shell", "cmd", "package", "resolve-activity", "--brief",
+        "-c", "android.intent.category.LAUNCHER", PKG_AOV,
+        timeout=60,
+    )
+    components = [line.strip() for line in resolved.splitlines() if "/" in line]
+    if components:
+        adb("shell", "am", "start", "-W", "-n", components[-1], timeout=60)
+    else:
+        adb("shell", "monkey", "-p", PKG_AOV, "-c", "android.intent.category.LAUNCHER", "1", timeout=60)
+    time.sleep(10)
+    return package_is_foreground(PKG_AOV)
+
+
+def recover_optional_play_games_prompt():
+    focus = current_focus_component()
+    blob = ui_text()
+    lower = blob.lower()
+
+    markers = [
+        "google play games",
+        "create a play games profile",
+        "sync progress and achievements",
+        "play across devices",
+        "no profile",
+        "make it easier to pick up where you",
+    ]
+    looks_like_play_games = any(marker in lower for marker in markers)
+
+    if not looks_like_play_games:
+        return False
+
+    log(f"Optional Google Play Games profile/sync prompt detected; foreground={focus}.")
+    screenshot("09-google-play-games-prompt")
+
+    dismissed = tap_exact_text(["Cancel", "Hủy"], timeout=4)
+    if not dismissed:
+        log("Play Games Cancel was not exposed; sending Android Back once.")
+        adb("shell", "input", "keyevent", "KEYCODE_BACK", timeout=30)
+        time.sleep(3)
+
+    return reopen_aov_after_external_prompt("Google Play Games profile prompt")
+
+
 def wait_for_aov_scene_ready():
     log(
         f"Waiting up to {AOV_RESOURCE_TIMEOUT}s for AOV resource loading/scene transition "
@@ -1140,13 +1186,45 @@ def wait_for_aov_scene_ready():
     start = time.time()
     end = start + AOV_RESOURCE_TIMEOUT
     previous = None
+    initial = None
     stable_count = 0
     next_shot = start + 30
     shot_index = 1
+    external_recoveries = 0
 
     while time.time() < end:
         if not package_is_foreground(PKG_AOV):
+            focus = current_focus_component()
+            log(f"AOV temporarily left foreground during resource wait; foreground={focus}.")
+
+            if recover_optional_play_games_prompt():
+                external_recoveries += 1
+                previous = None
+                stable_count = 0
+                log(f"Returned to AOV after optional Play Games prompt (recovery #{external_recoveries}).")
+                continue
+
+            # Some Google overlays take a moment to expose their accessibility
+            # labels. Give them a short grace period before declaring a real exit.
+            time.sleep(5)
+            if package_is_foreground(PKG_AOV):
+                log("AOV returned to foreground after a transient external UI.")
+                previous = None
+                stable_count = 0
+                continue
+
+            if recover_optional_play_games_prompt():
+                external_recoveries += 1
+                previous = None
+                stable_count = 0
+                log(f"Returned to AOV after delayed Play Games prompt (recovery #{external_recoveries}).")
+                continue
+
             screenshot("09-aov-left-foreground")
+            (OUT / "aov-resource-foreground.txt").write_text(
+                f"foreground={focus}\n",
+                encoding="utf-8",
+            )
             return "AOV_LEFT_FOREGROUND_DURING_RESOURCE_WAIT"
 
         # If a real visible login/provider label is exposed, the scene is ready.
@@ -1158,24 +1236,33 @@ def wait_for_aov_scene_ready():
         current = capture_screen_samples()
         elapsed = time.time() - start
 
+        if current is not None and initial is None:
+            initial = current
+
         if current is not None and previous is not None and elapsed >= AOV_RESOURCE_MIN_WAIT:
             full_diff = sample_diff(previous[0], current[0])
             bottom_diff = sample_diff(previous[1], current[1])
+            scene_diff = sample_diff(initial[0], current[0]) if initial is not None else 0.0
 
-            if full_diff < 0.018 and bottom_diff < 0.025:
+            # A first-launch resource screen may appear visually stable while
+            # waiting on the network. Do not call it "ready" unless the overall
+            # scene has changed materially from the initial loading scene.
+            scene_changed = scene_diff >= 0.08
+
+            if scene_changed and full_diff < 0.018 and bottom_diff < 0.025:
                 stable_count += 1
             else:
                 stable_count = 0
 
             log(
                 f"AOV scene stability: elapsed={int(elapsed)}s "
-                f"full_diff={full_diff:.4f} bottom_diff={bottom_diff:.4f} "
-                f"stable={stable_count}/3"
+                f"scene_diff={scene_diff:.4f} full_diff={full_diff:.4f} "
+                f"bottom_diff={bottom_diff:.4f} stable={stable_count}/3"
             )
 
             if stable_count >= 3:
                 screenshot("09-aov-scene-stable")
-                log("AOV screen has been stable long enough to stop treating it as an active resource-loading transition.")
+                log("AOV transitioned away from the initial loading scene and is now stable.")
                 return "READY_STABLE"
 
         if current is not None:
