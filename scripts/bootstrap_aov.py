@@ -443,6 +443,65 @@ def package_is_foreground(pkg):
 def package_installed(pkg):
     return bool(adb("shell", "pm", "path", pkg).strip())
 
+def aov_pid():
+    return adb("shell", "pidof", PKG_AOV, timeout=30).strip()
+
+def start_aov_like_launcher():
+    # Send the same intent the launcher icon sends (MAIN/LAUNCHER +
+    # NEW_TASK|RESET_TASK_IF_NEEDED). If AOV is already running, Android then
+    # just brings its existing task forward. A bare `am start -n <component>`
+    # does not match the task's root intent and stacks a second launcher
+    # activity on top of the running Unity activity, which can make the game
+    # restart or exit.
+    resolved = adb(
+        "shell", "cmd", "package", "resolve-activity", "--brief",
+        "-c", "android.intent.category.LAUNCHER", PKG_AOV,
+        timeout=60,
+    )
+    components = [line.strip() for line in resolved.splitlines() if "/" in line]
+    if not components:
+        adb("shell", "monkey", "-p", PKG_AOV, "-c", "android.intent.category.LAUNCHER", "1", timeout=60)
+        return ""
+    return adb(
+        "shell", "am", "start", "-W",
+        "-a", "android.intent.action.MAIN",
+        "-c", "android.intent.category.LAUNCHER",
+        "-f", "0x10200000",
+        "-n", components[-1],
+        timeout=60,
+    )
+
+def save_aov_exit_diagnostics(name):
+    # Why did AOV leave the foreground? ApplicationExitInfo (Android 11+)
+    # records the exit reason (crash, native crash, ANR, low memory, ...).
+    pid = aov_pid()
+    exit_info = adb("shell", "dumpsys", "activity", "exit-info", PKG_AOV, timeout=60)
+    raw = adb("logcat", "-d", "-t", "600", timeout=60)
+    markers = [
+        PKG_AOV.lower(),
+        "androidruntime",
+        "fatal exception",
+        "force finishing activity",
+        "has died",
+        "crash",
+        "sigsegv",
+        "sigabrt",
+        "abort message",
+        "lowmemorykiller",
+    ]
+    keep = [line for line in raw.splitlines() if any(m in line.lower() for m in markers)]
+    (OUT / f"{name}.txt").write_text(
+        f"pid={pid or 'none'}\n"
+        f"foreground={current_focus_component()}\n\n"
+        "=== exit-info (latest first) ===\n"
+        + "\n".join(exit_info.splitlines()[:80])
+        + "\n\n=== logcat (filtered) ===\n"
+        + "\n".join(keep[-250:])
+        + "\n",
+        encoding="utf-8",
+    )
+    return pid
+
 def wait_for_package(pkg, timeout):
     end = time.time() + timeout
     last_shot = 0
@@ -1034,55 +1093,23 @@ def launch_aov():
     # activity. This is a normal launch retry, not an emulator-detection bypass.
     if not package_is_foreground(PKG_AOV):
         log("AOV is not in foreground after the first launch attempt; retrying the resolved launcher activity.")
-        resolved = adb(
-            "shell", "cmd", "package", "resolve-activity", "--brief",
-            "-c", "android.intent.category.LAUNCHER", PKG_AOV,
-            timeout=60,
-        )
-        components = [line.strip() for line in resolved.splitlines() if "/" in line]
-        if components:
-            component = components[-1]
-            start_out = adb("shell", "am", "start", "-W", "-n", component, timeout=60)
-            for line in start_out.splitlines():
-                if line.startswith(("Status:", "LaunchState:", "Activity:", "TotalTime:")):
-                    log("AOV launch: " + line)
-            time.sleep(12)
+        start_out = start_aov_like_launcher()
+        for line in start_out.splitlines():
+            if line.startswith(("Status:", "LaunchState:", "Activity:", "TotalTime:")):
+                log("AOV launch: " + line)
+        time.sleep(12)
 
     screenshot("08-aov-launched")
     dump_ui("aov-launched")
 
-    foreground = package_is_foreground(PKG_AOV)
-    pid = adb("shell", "pidof", PKG_AOV, timeout=30).strip()
-
-    if foreground:
+    if package_is_foreground(PKG_AOV):
         log("AOV is confirmed in foreground.")
         return True
 
+    # Save focused crash/activity diagnostics without dumping account data.
+    pid = save_aov_exit_diagnostics("aov-launch-diagnostics")
     state = "AOV_EXITED_AFTER_LAUNCH" if not pid else "AOV_NOT_FOREGROUND"
     (OUT / "aov-launch-state.txt").write_text(state + "\n", encoding="utf-8")
-
-    # Save focused crash/activity diagnostics without dumping account data.
-    raw = adb("logcat", "-d", "-t", "400", timeout=60)
-    keep = []
-    markers = [
-        PKG_AOV.lower(),
-        "androidruntime",
-        "fatal exception",
-        "force finishing activity",
-        "has died",
-        "crash",
-        "sigsegv",
-        "sigabrt",
-        "abort message",
-    ]
-    for line in raw.splitlines():
-        lower = line.lower()
-        if any(marker in lower for marker in markers):
-            keep.append(line)
-    (OUT / "aov-launch-diagnostics.txt").write_text(
-        "\n".join(keep[-250:]) + "\n",
-        encoding="utf-8",
-    )
     log(f"AOV did not remain in foreground after launch: {state}.")
     return False
 
@@ -1133,17 +1160,22 @@ def sample_diff(a, b):
 
 
 def reopen_aov_after_external_prompt(reason):
-    log(f"Reopening AOV after external UI: {reason}.")
-    resolved = adb(
-        "shell", "cmd", "package", "resolve-activity", "--brief",
-        "-c", "android.intent.category.LAUNCHER", PKG_AOV,
-        timeout=60,
+    # The Play Games sign-in activity sits on top of AOV's task. Once it is
+    # cancelled, Android returns to AOV by itself, so wait for that before
+    # sending any launch intent of our own.
+    end = time.time() + 20
+    while time.time() < end:
+        if package_is_foreground(PKG_AOV):
+            log(f"AOV returned to foreground by itself after external UI: {reason}.")
+            return True
+        time.sleep(3)
+
+    pid = aov_pid()
+    log(
+        f"AOV did not return by itself after external UI: {reason}; "
+        f"process={'alive' if pid else 'gone'}. Bringing its task to front like the launcher icon."
     )
-    components = [line.strip() for line in resolved.splitlines() if "/" in line]
-    if components:
-        adb("shell", "am", "start", "-W", "-n", components[-1], timeout=60)
-    else:
-        adb("shell", "monkey", "-p", PKG_AOV, "-c", "android.intent.category.LAUNCHER", "1", timeout=60)
+    start_aov_like_launcher()
     time.sleep(10)
     return package_is_foreground(PKG_AOV)
 
@@ -1221,10 +1253,26 @@ def wait_for_aov_scene_ready():
                 continue
 
             screenshot("09-aov-left-foreground")
+            pid = save_aov_exit_diagnostics(f"aov-left-foreground-{external_recoveries}")
+
+            # Still running but sent to background: bring it back like the
+            # launcher icon would, a limited number of times.
+            if pid and external_recoveries < 3:
+                external_recoveries += 1
+                log(f"AOV process is still alive in background; bringing it to front (recovery #{external_recoveries}).")
+                start_aov_like_launcher()
+                time.sleep(10)
+                previous = None
+                stable_count = 0
+                continue
+
             (OUT / "aov-resource-foreground.txt").write_text(
-                f"foreground={focus}\n",
+                f"foreground={focus}\nprocess={'alive' if pid else 'gone'}\n",
                 encoding="utf-8",
             )
+            if not pid:
+                log("AOV process is gone; see aov-left-foreground-*.txt for the exit reason.")
+                return "AOV_EXITED_DURING_RESOURCE_WAIT"
             return "AOV_LEFT_FOREGROUND_DURING_RESOURCE_WAIT"
 
         # If a real visible login/provider label is exposed, the scene is ready.
@@ -1290,6 +1338,7 @@ def attempt_garena_login():
 
     if resource_state in [
         "AOV_LEFT_FOREGROUND_DURING_RESOURCE_WAIT",
+        "AOV_EXITED_DURING_RESOURCE_WAIT",
         "AOV_RESOURCE_WAIT_TIMEOUT",
     ]:
         (OUT / "aov-login-state.txt").write_text(resource_state + "\n", encoding="utf-8")
