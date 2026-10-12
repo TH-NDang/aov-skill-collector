@@ -22,3 +22,17 @@ JSON validity is only a format check, not an accuracy score. Values remain strin
 Manually check hero names and Vietnamese accents; every attribute value and label; decimals and percentages; the order of per-level damage and cooldown values; omitted clauses and hallucinated content. Benchmark results apply to these samples and this hardware only.
 
 Pushes touching the trial script or workflow on this branch start the experiment. Main and existing emulator workflows are not modified. No API key or paid GPU is required. Artifacts expire after 14 days. Re-running currently repeats the three samples; cross-run checkpoint resume is not implemented in this bounded trial.
+
+## Measured result — 2026-10-12
+
+Run: https://github.com/TH-NDang/aov-skill-collector/actions/runs/38214550652
+
+All three requests completed, returned parseable JSON and stopped normally. The runner had 4 logical CPUs and 15989 MiB RAM. Observed model-server peak RSS was 6861.2 MiB (about 6.7 GiB); this is not total machine memory. Model load took 2.02 seconds. Whole workflow took approximately 5 minutes 40 seconds including build and downloads.
+
+| Airi sample | Request time | Visual review |
+| --- | ---: | --- |
+| Overview | 6.00 seconds | Airi and Ninja rồng correct; title was null |
+| Attributes | 50.50 seconds | All 16 displayed attribute values matched; layout reading order changed |
+| Skill 1 detail | 58.21 seconds | All 18 values in three numeric table rows matched, including 7.6; prose contained errors |
+
+Observed prose errors: Phi tiêu became Phi tiều; Long ấn became Long ẩn; the sentence explaining the refresh of skill 2 was truncated/garbled. The model returned an empty uncertain_parts list despite these errors. JSON validity and self-reported uncertainty must not be used as accuracy guarantees. These three crops are not a full dataset benchmark. No automatic production import is enabled.
