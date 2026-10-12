@@ -1,0 +1,57 @@
+name: Compare Qwen3-VL Thinking on CPU
+on:
+  push:
+    branches: [codex/qwen3-vl-ocr-test]
+    paths:
+      - scripts/test_qwen_thinking.py
+      - prompts/aov-extract-v2.txt
+      - .github/workflows/test-qwen-thinking.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: qwen-thinking-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  thinking:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        model: [4B-Thinking, 8B-Thinking]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    env:
+      LLAMA_COMMIT: 08ffba21e5c2f1728b6b405c05ff3913f65706d4
+      MODEL_VARIANT: ${{ matrix.model }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Record hardware and dependencies
+        run: |
+          mkdir -p output
+          lscpu > output/cpu.txt
+          free -m > output/memory.txt
+          python -m pip install Pillow==11.3.0
+      - name: Build pinned CPU runtime
+        run: |
+          git init llama.cpp
+          git -C llama.cpp remote add origin https://github.com/ggml-org/llama.cpp.git
+          git -C llama.cpp fetch --depth 1 origin "$LLAMA_COMMIT"
+          git -C llama.cpp checkout --detach FETCH_HEAD
+          cmake -S llama.cpp -B llama.cpp/build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=ON
+          cmake --build llama.cpp/build --target llama-server -j 4
+      - name: Read and interpret three images
+        run: |
+          cp prompts/aov-extract-v2.txt output/prompt.txt
+          python -u scripts/test_qwen_thinking.py
+      - name: Upload result even after failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen-${{ matrix.model }}-${{ github.run_id }}
+          path: output/
+          retention-days: 14
+          if-no-files-found: error
